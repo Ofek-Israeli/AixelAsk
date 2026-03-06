@@ -8,12 +8,14 @@
 ├── Kconfig.model                    # Menu: inference & embedding model config
 ├── Kconfig.server                   # Menu: SGLang server config
 ├── Kconfig.dataset                  # Menu: dataset selection & paths
+├── Kconfig.split                    # Menu: split mode, per-dataset explicit index lists for train/validation/test
 ├── Kconfig.retrieval                # Menu: retrieval / DAG parameters
-├── Kconfig.output                   # Menu: output paths, logging, caching
+├── Kconfig.output                   # Menu: output paths, logging, persistent model/embedding cache paths
 ├── Kconfig.runtime                  # Menu: workers, retries, batching
 ├── Kconfig.dagstats                 # Menu: DAG statistics collection
 ├── Kconfig.training                 # Menu: training mode / algorithm / LoRA / reward / overfit PoC
 ├── Kconfig.training_stats           # Menu: training statistics, checkpoints, TeX curve maintenance
+├── Kconfig.test_trained             # Menu: post-training test evaluation (checkpoint selection, output paths)
 ├── Makefile                         # make menuconfig, make run, make train, etc.
 ├── requirements.txt                 # Python deps (sglang, sentence-transformers, peft, bitsandbytes, etc.)
 ├── README.md                        # Implementation-written project guide: setup, config, run, train, outputs, troubleshooting
@@ -23,11 +25,25 @@
 ├── defconfig.fewshot_parallel_hybrid_ext  # Shipped .config for parallel+hybrid extended few-shot baseline
 ├── defconfig.train_grpo             # Shipped .config for GRPO training
 ├── defconfig.train_overfit_poc      # Shipped .config for small-sample overfit PoC
+├── prompt/                          # Vendored prompt templates and few-shot examples (copied from upstream AixelAsk/prompt/)
+│   ├── get_dag.md                   # DAG-generation prompt template (standard)
+│   ├── get_dag_min_depth.md         # DAG-generation prompt template (min-depth baseline)
+│   ├── final_reasoning_DAG.md       # Final reasoning prompt (vendored from upstream)
+│   ├── noplan_reasoning.md          # Fallback no-plan reasoning prompt (vendored)
+│   ├── get_row_template.md          # Row description template (vendored)
+│   ├── get_col_template.md          # Column description template (vendored)
+│   ├── prompt_schema_linking.md     # Schema linking prompt (vendored)
+│   └── fewshot/                     # Few-shot examples for DAG generation
+│       ├── fewshot_parallel.txt     # 2 parallel DAG examples
+│       ├── fewshot_sequential.txt   # 2 sequential DAG examples
+│       ├── fewshot_hybrid.txt       # 2 hybrid DAG examples
+│       ├── fewshot_parallel_extended.txt  # Extended parallel examples
+│       └── fewshot_hybrid_extended.txt    # Extended hybrid examples
 ├── tools/
 │   └── menuconfig.py                # Thin wrapper invoking kconfiglib's menuconfig
 ├── src/
 │   ├── __init__.py
-│   ├── main.py                      # Entrypoint: parses .config, dispatches to pipeline or training
+│   ├── main.py                      # Inference/evaluation entrypoint: SGLang server + pipeline on the test split
 │   ├── config.py                    # Reads .config into a Python dict/dataclass
 │   ├── sglang_server.py             # Start/stop/health-check the SGLang server
 │   ├── sglang_client.py             # OpenAI-compatible client that talks to SGLang
@@ -38,39 +54,47 @@
 │   ├── dag_executor.py              # Topo-level parallel DAG executor with batched retrieval
 │   ├── dag_stats.py                 # Thread-safe DAG metric aggregator + end-of-run summary
 │   ├── item_context.py              # contextvars-based per-item context for logging under concurrency
+│   ├── call_recorder.py             # Thread-safe LLM call accumulator: record(), update(), get_calls_for_item(), flush_for_item()
 │   ├── download_models.py           # HF snapshot_download for inference + embedding models
 │   ├── pipeline.py                  # Orchestrates: embeddings → reasoning (calls existing scripts)
-│   ├── logging_setup.py             # Structured logging config
+│   ├── logging_setup.py             # Logging config: Rich console handler + standard file handler
 │   └── training/
 │       ├── __init__.py
-│       ├── train_main.py            # Training entrypoint: parses config, orchestrates GRPO loop
-│       ├── train_config.py          # Training-specific parsed config / dataclasses
-│       ├── rl_dataset.py            # Prompt-only dataset formatting for GRPO (with gold answers for reward)
-│       ├── reward.py                # Weighted scalar reward computation
-│       ├── dag_reward_parser.py     # Parse LLM output → DAG structure, depth, validity, answer
-│       ├── grpo_trainer.py          # Manual GRPO training loop (no trl dependency)
-│       ├── lora_factory.py          # LoRA / QLoRA model + tokenizer construction
-│       ├── generation.py            # Batched sampling during GRPO (grouped completions)
-│       ├── train_stats.py           # Append-only training metric aggregator (step/eval/summary)
-│       ├── checkpointing.py         # Save/load checkpoints, best model, latest, adapter merge
-│       ├── curves.py                # Maintains TSV data + TeX/PGFPlots templates for learning curves
-│       ├── tex_compile.py           # Periodic pdflatex/latexmk execution for curve PDFs
+│       ├── train_main.py            # Training entrypoint: builds GRPOTrainer, registers callbacks, runs training
+│       ├── train_config.py          # Training-specific parsed config / dataclasses; maps Kconfig → GRPOConfig
+│       ├── rl_dataset.py            # Dataset formatting for GRPO via datasets.Dataset.map(); preserves source_dataset + source_index provenance
+│       ├── dataset_registry.py      # Canonical dataset-key → JSONL-path mapping and per-dataset loading (custom: AixelAsk-specific dataset layout)
+│       ├── reward.py                # Weighted scalar reward computation (custom: project-specific DAG reward formula)
+│       ├── dag_reward_parser.py     # Parse LLM output → DAG structure, depth, validity, answer (custom: project-specific DAG format)
+│       ├── grpo_trainer.py          # TRL GRPOTrainer wrapper: builds GRPOConfig, registers reward_func and project callbacks
+│       ├── lora_factory.py          # LoRA / QLoRA model + tokenizer construction via PEFT + BitsAndBytes; reference model managed by TRL
+│       ├── train_stats.py           # TRL TrainerCallback for project-specific JSONL stats/summary + curves TSV updates
+│       ├── checkpointing.py         # Project-specific checkpoint metadata, best/latest symlinks, merged export; save/load delegated to Trainer-native mechanisms
+│       ├── curves.py                # Maintains TSV data + Jinja2-rendered TeX/PGFPlots templates for learning curves (custom: no Python lib does TeX curve maintenance)
+│       ├── tex_compile.py           # Periodic pdflatex/latexmk; compile scratch in CONFIG_EPHEMERAL_TMPDIR, final PDFs to persistent CONFIG_TRAIN_CURVES_DIR
 │       ├── tiny_overfit_poc.py      # Dedicated helpers for small-sample overfit experiment
-│       └── split_utils.py           # Stable seeded train/dev split utilities
+│       ├── split_utils.py           # Split construction via datasets.Dataset ops; custom: explicit-index semantics, cross-split overlap checks, provenance injection
+│       ├── test_main.py             # Post-training test evaluation entrypoint: evaluate a trained checkpoint on the test split
+│       └── checkpoint_resolver.py   # Resolve best/latest/merged/explicit checkpoint paths with validation
 ├── tests/
 │   ├── test_config.py               # Unit: .config parsing
 │   ├── test_sglang_client.py        # Unit: client formatting
 │   ├── test_embedding_client.py     # Unit: embedding shape/type
 │   ├── test_dag_stats.py            # Unit: dag_stats metrics on synthetic DAGs
 │   ├── test_dag_executor.py         # Unit: topo-level scheduling, batching, concurrency limits
+│   ├── test_call_recorder.py        # Unit: record(), update(), thread safety, flush_for_item()
 │   ├── test_smoke.py                # Smoke: full pipeline on 2-3 rows
 │   ├── test_reward.py               # Unit: weighted reward computation, penalties, normalization
 │   ├── test_dag_reward_parser.py    # Unit: DAG output parsing, validity, depth extraction
 │   ├── test_train_config.py         # Unit: training config parsing, seed inheritance, mode selection
-│   ├── test_train_stats.py          # Unit: step/eval stats append, summary aggregation, crash resume
+│   ├── test_train_stats.py          # Unit: TrainerCallback JSONL output, summary aggregation, curves TSV update
 │   ├── test_curves.py               # Unit: TSV update, TeX generation, compile scheduling
 │   ├── test_tiny_overfit_poc.py     # Unit: seeded tiny-subset selection determinism
-│   └── test_grpo_smoke.py           # Smoke: 1–2 step mocked GRPO loop with stats/curves output
+│   ├── test_split_utils.py          # Unit: split construction across all modes, overlap/bounds checks
+│   ├── test_dataset_registry.py     # Unit: canonical dataset paths, loading, Scalability concatenation
+│   ├── test_checkpoint_resolver.py  # Unit: checkpoint resolution for post-training test evaluation
+│   ├── test_checkpointing.py        # Unit: project-specific checkpoint metadata, symlinks, index, merged export
+│   └── test_grpo_smoke.py           # Smoke: 1–2 step TRL GRPOTrainer run with project reward_func + callbacks
 └── docs/
     └── run_plan.md                  # This plan (filled in)
 ```
@@ -87,9 +111,11 @@ PYTHON       := python3
 SRC          := src
 MENUCONFIG   := tools/menuconfig.py
 
-.PHONY: menuconfig run server-start server-stop download test clean \
+.PHONY: menuconfig defconfig run server-start server-stop download test clean clean-all \
+       run-baseline run-baseline-fewshot-ph-ext \
        train train-grpo train-overfit-poc resume-train \
-       compile-curves show-train-config
+       test-trained test-trained-best test-trained-latest \
+       compile-curves show-train-config show-paths
 
 menuconfig: $(MENUCONFIG)
 	@$(PYTHON) -c "import kconfiglib" 2>/dev/null || \
@@ -114,13 +140,17 @@ download: $(DOTCONFIG)
 test:
 	$(PYTHON) -m pytest tests/ -v
 
-run-baseline: defconfig.min_depth
-	cp defconfig.min_depth $(DOTCONFIG)
-	$(PYTHON) -m src.main --config $(DOTCONFIG)
+run-baseline: $(DOTCONFIG)
+	$(PYTHON) -m src.main --config $(DOTCONFIG) \
+		--override CONFIG_DAG_PROMPT_VARIANT=DAG_PROMPT_MIN_DEPTH_BASELINE \
+		--override CONFIG_RESULT_FILE=output/results_min_depth.jsonl \
+		--override CONFIG_DAG_STATS_FILE=output/dag_stats_min_depth.json
 
-run-baseline-fewshot-ph-ext: defconfig.fewshot_parallel_hybrid_ext
-	cp defconfig.fewshot_parallel_hybrid_ext $(DOTCONFIG)
-	$(PYTHON) -m src.main --config $(DOTCONFIG)
+run-baseline-fewshot-ph-ext: $(DOTCONFIG)
+	$(PYTHON) -m src.main --config $(DOTCONFIG) \
+		--override CONFIG_FEWSHOT_VARIANT=FEWSHOT_PARALLEL_HYBRID_EXTENDED \
+		--override CONFIG_RESULT_FILE=output/results_fewshot_ph_ext.jsonl \
+		--override CONFIG_DAG_STATS_FILE=output/dag_stats_fewshot_ph_ext.json
 
 train: $(DOTCONFIG)
 	$(PYTHON) -m src.training.train_main --config $(DOTCONFIG)
@@ -136,22 +166,42 @@ train-overfit-poc: defconfig.train_overfit_poc
 resume-train: $(DOTCONFIG)
 	$(PYTHON) -m src.training.train_main --config $(DOTCONFIG) --resume
 
+test-trained: $(DOTCONFIG)
+	$(PYTHON) -m src.training.test_main --config $(DOTCONFIG)
+
+test-trained-best: $(DOTCONFIG)
+	$(PYTHON) -m src.training.test_main --config $(DOTCONFIG) --checkpoint best
+
+test-trained-latest: $(DOTCONFIG)
+	$(PYTHON) -m src.training.test_main --config $(DOTCONFIG) --checkpoint latest
+
 compile-curves: $(DOTCONFIG)
 	$(PYTHON) -m src.training.tex_compile --config $(DOTCONFIG) --all
 
 show-train-config: $(DOTCONFIG)
-	@grep '^CONFIG_TRAIN\|^CONFIG_GRPO\|^CONFIG_REWARD\|^CONFIG_OVERFIT\|^CONFIG_GLOBAL_SEED\|^CONFIG_TRAINING' $(DOTCONFIG) | sort
+	@grep '^CONFIG_TRAIN\|^CONFIG_GRPO\|^CONFIG_REWARD\|^CONFIG_OVERFIT\|^CONFIG_GLOBAL_SEED\|^CONFIG_TRAINING\|^CONFIG_SPLIT\|^CONFIG_TEST_TRAINED' $(DOTCONFIG) | sort
+
+show-paths: $(DOTCONFIG)
+	@$(PYTHON) -c "import os; from src.config import load_config; c = load_config('$(DOTCONFIG)'); print('PROJECT_DIR (immutable module root):', c.PROJECT_DIR); print('PERSISTENT_ROOT (output/cache root):', c.PERSISTENT_ROOT); print('MODEL_CACHE_DIR (HF_HOME):', c.MODEL_CACHE_DIR); print('HUB_CACHE (actual model storage):', os.path.join(c.MODEL_CACHE_DIR, 'hub')); print('EMBEDDING_CACHE:', c.EMBEDDING_CACHE); print('RESULT_FILE:', c.RESULT_FILE); print('LOG_FILE:', c.LOG_FILE); print('DAG_STATS_FILE:', c.DAG_STATS_FILE); print('TRAIN_OUTPUT_DIR:', c.TRAIN_OUTPUT_DIR); print('TRAIN_CURVES_DIR:', c.TRAIN_CURVES_DIR); print('EPHEMERAL_TMPDIR:', c.EPHEMERAL_TMPDIR); print('SPLIT_MODE:', c.SPLIT_MODE); print('INFERENCE_DATASET_PATH:', c.INFERENCE_DATASET_PATH); print('HF_HOME (set by config.py):', os.environ.get('HF_HOME', 'not set')); print('TRANSFORMERS_CACHE (set by config.py):', os.environ.get('TRANSFORMERS_CACHE', 'not set'))"
 
 clean:
 	rm -f $(DOTCONFIG)
 	rm -rf __pycache__ src/__pycache__ tests/__pycache__
+
+clean-all:
+	@echo "WARNING: This deletes project-local persistent artifacts (output/, cache/, .sglang.pid)."
+	@echo "HF model cache (CONFIG_MODEL_CACHE_DIR) is NOT deleted. Remove it manually if needed."
+	@echo "Press Ctrl+C within 5s to abort." && sleep 5
+	rm -f $(DOTCONFIG)
+	rm -rf __pycache__ src/__pycache__ tests/__pycache__
+	rm -rf output/ cache/ .sglang.pid
 ```
 
-**`defconfig.min_depth`:** A shipped `.config` file identical to `defconfig` except `CONFIG_DAG_PROMPT_VARIANT` is set to `DAG_PROMPT_MIN_DEPTH_BASELINE` (and `CONFIG_RESULT_FILE` / `CONFIG_DAG_STATS_FILE` point to `output/results_min_depth.jsonl` / `output/dag_stats_min_depth.json` to avoid overwriting standard results). Generated once by running `make menuconfig`, toggling the variant, and saving.
+**`defconfig.min_depth`:** A shipped reference `.config` showing the min-depth baseline settings (`CONFIG_DAG_PROMPT_VARIANT=DAG_PROMPT_MIN_DEPTH_BASELINE`, separate output paths). **Not copied over `.config` by `make run-baseline`** — the baseline target uses `--override` CLI flags instead, so the user's current dataset/split/test configuration is preserved. This file serves as documentation and as a starting point for `make menuconfig` customization.
 
-**`defconfig.fewshot_parallel_hybrid_ext`:** Identical to `defconfig` (standard prompt) except `CONFIG_FEWSHOT_VARIANT` is set to `FEWSHOT_PARALLEL_HYBRID_EXTENDED`. Output paths are `output/results_fewshot_ph_ext.jsonl` and `output/dag_stats_fewshot_ph_ext.json`. The DAG prompt template is unchanged (standard); only the `{fewshot}` content differs.
+**`defconfig.fewshot_parallel_hybrid_ext`:** A shipped reference `.config` showing the parallel+hybrid extended few-shot baseline settings (`CONFIG_FEWSHOT_VARIANT=FEWSHOT_PARALLEL_HYBRID_EXTENDED`, separate output paths). Same overlay design as `defconfig.min_depth` — `make run-baseline-fewshot-ph-ext` uses `--override` flags, not a full config copy.
 
-**`defconfig.train_grpo`:** A shipped `.config` for GRPO training. Sets `CONFIG_ENABLE_TRAINING=y`, `CONFIG_TRAINING_MODE=TRAINING_MODE_GRPO`, `CONFIG_GLOBAL_SEED=42`, LoRA rank 16, 4-bit quantization enabled, gradient checkpointing enabled, reward weights `w_correct=1.0, w_valid=0.5, w_depth=0.1, w_invalid=0.5`, and `CONFIG_TRAIN_OUTPUT_DIR="output/train_grpo"`. Stats and curves output to `output/train_grpo/stats/` and `output/train_grpo/curves/`. Uses `CONFIG_TRAIN_DATASET_PATH` pointing to the default WikiTQ-4k training set. TeX curve compilation is enabled with `CONFIG_TRAIN_CURVES_COMPILE_EVERY_STEPS=100`.
+**`defconfig.train_grpo`:** A shipped `.config` for GRPO training. Sets `CONFIG_ENABLE_TRAINING=y`, `CONFIG_TRAINING_MODE=TRAINING_MODE_GRPO`, `CONFIG_GLOBAL_SEED=42`, LoRA rank 16, 4-bit quantization enabled, gradient checkpointing enabled, reward weights `w_correct=1.0, w_valid=0.5, w_depth=0.1, w_invalid=0.5`, and `CONFIG_TRAIN_OUTPUT_DIR="output/train_grpo"`. Output layout: `output/train_grpo/train_steps.jsonl` (per-step stats), `output/train_grpo/train_evals.jsonl` (per-eval stats), `output/train_grpo/train_stats_summary.json` (end-of-run summary), `output/train_grpo/curves/` (TeX learning curves), `output/train_grpo/checkpoints/` (model checkpoints), `output/train_grpo/resolved_seeds.json`, `output/train_grpo/reward_config.json`. Uses `CONFIG_SPLIT_MODE=SPLIT_MODE_SEEDED_RATIO` (default) with `CONFIG_TRAIN_DATASET_PATH` pointing to the default WikiTQ-4k training set. TeX curve compilation is enabled with `CONFIG_TRAIN_CURVES_COMPILE_EVERY_STEPS=100`. After training completes, evaluate the trained model with `make test-trained-best` (recommended) — results are written to `output/train_grpo/test_best/`.
 
 **`defconfig.train_overfit_poc`:** Identical to `defconfig.train_grpo` except: `CONFIG_TRAINING_MODE=TRAINING_MODE_OVERFIT_POC`, `CONFIG_OVERFIT_POC_NUM_EXAMPLES=16`, `CONFIG_OVERFIT_POC_SELECTION_MODE=FIRST_N`, `CONFIG_GRPO_EVAL_EVERY_STEPS=5`, `CONFIG_GRPO_SAVE_EVERY_STEPS=10`, `CONFIG_TRAIN_CURVES_UPDATE_EVERY_STEPS=5`, `CONFIG_TRAIN_CURVES_COMPILE_EVERY_STEPS=25`, `CONFIG_TRAIN_OUTPUT_DIR="output/train_overfit_poc"`. Designed for rapid iteration to validate the training stack end-to-end before large-scale runs.
 
@@ -162,34 +212,54 @@ clean:
 - What `nlp_project` is (one-paragraph summary of the local inference + training module).
 - Directory structure overview (reference the file tree in §1).
 - Dependency installation (`pip install -r requirements.txt`, `pip check`).
-- `make` targets: `menuconfig`, `defconfig`, `run`, `run-baseline`, `run-baseline-fewshot-ph-ext`, `download`, `server-start`, `server-stop`, `test`, `clean`, `train`, `train-grpo`, `train-overfit-poc`, `resume-train`, `compile-curves`, `show-train-config`.
+- `make` targets: `menuconfig`, `defconfig`, `run`, `run-baseline`, `run-baseline-fewshot-ph-ext`, `download`, `server-start`, `server-stop`, `test`, `clean`, `clean-all`, `train`, `train-grpo`, `train-overfit-poc`, `resume-train`, `test-trained`, `test-trained-best`, `test-trained-latest`, `compile-curves`, `show-train-config`, `show-paths`.
 - `make menuconfig` usage (Kconfig TUI, save → `.config`).
-- Inference workflow: `make defconfig && make run` (standard), `make run-baseline` (min-depth), `make run-baseline-fewshot-ph-ext` (fewshot variant).
+- Split modes: `SPLIT_MODE_SEEDED_RATIO` (default, legacy single-file split), `SPLIT_MODE_EXPLICIT_INDICES` (per-dataset index lists), `SPLIT_MODE_OVERFIT_POC` (tiny subset). How to specify explicit per-dataset index lists in `.config` (e.g. `CONFIG_SPLIT_TRAIN_WIKITQ_4K_INDICES="0,1,2,3"`). At least one concrete example `.config` snippet showing explicit split configuration.
+- Inference workflow: `make defconfig && make run` (standard), `make run-baseline` (min-depth), `make run-baseline-fewshot-ph-ext` (fewshot variant). Clearly state that **all baselines evaluate only the configured test split** — train and validation examples are never processed during inference.
+- Split roles: **train** = GRPO optimizer batches only (never evaluated in final runs); **validation** = periodic training-time monitoring and best-checkpoint selection only (never used for gradient updates or final evaluation); **test** = final reported evaluation only (`make run`, baselines, `make test-trained*`). Validation examples never appear in test evaluation results.
 - Training workflows: overfit-PoC (`make train-overfit-poc`), full GRPO (`make train-grpo`), resume (`make resume-train`).
-- How to use a trained checkpoint for inference (point `CONFIG_INFERENCE_MODEL` at merged checkpoint, then `make run`).
+- Post-training test evaluation: how to evaluate a trained checkpoint on the test split using `make test-trained-best` / `make test-trained-latest`. Checkpoint selection (`best` / `latest` / `merged` / explicit path via `CONFIG_TEST_TRAINED_CHECKPOINT_SOURCE`). Where trained-model test outputs go (`<TRAIN_OUTPUT_DIR>/test_<source>/`). That this evaluation uses **only the test split**. At least one concrete `.config` example for trained-checkpoint testing.
+- Advanced/manual trained-model inference: point `CONFIG_INFERENCE_MODEL` at a merged checkpoint and run `make run` (documented as the manual alternative to `make test-trained`).
+- Prompt vendoring: all non-dataset prompt files (DAG generation, reasoning, schema linking, few-shot examples) are vendored under `nlp_project/prompt/`. The module has no implicit runtime dependency on upstream `AixelAsk/prompt/` files. Only dataset JSONL files reference the upstream AixelAsk repo.
 - Checkpoint and output locations: `output/results*.jsonl`, `output/dag_stats*.json`, `output/train*/checkpoints/`, `output/train*/curves/pdf/`.
 - Learning curves / TeX curve PDFs: where they live, how to compile manually (`make compile-curves`).
 - Shipped defconfigs: `defconfig`, `defconfig.min_depth`, `defconfig.fewshot_parallel_hybrid_ext`, `defconfig.train_grpo`, `defconfig.train_overfit_poc`.
-- Common troubleshooting: SGLang server won't start, port conflicts, OOM, pdflatex not found, model download issues.
+- Runpod storage: Volume disk vs. Container disk explanation, all three recommended sizing tiers (40/100 GB minimal, 60/150 GB recommended, 60/200 GB heavy), what lives where (table from §17b), and verification instructions: how to confirm `/workspace` is the Volume mount (`df -h /workspace`), how to verify resolved persistent paths via `make show-paths` (all persistent paths should start with `/workspace/`), and how to check the HF model cache is on Volume (`ls -d /workspace/.cache/huggingface/hub`).
+- Common troubleshooting: SGLang server won't start, port conflicts, OOM, pdflatex not found, model download issues, model cache on wrong disk.
 
 The README must be kept aligned with: Kconfig options, shipped defconfigs, Makefile targets, output directory layout, and training/inference entrypoints. If any of these change during implementation, the README must be updated accordingly.
+
+**README maintenance rule:** The README is a manually-written deliverable, not auto-generated. Before any implementation milestone is considered complete, the implementer must verify the README reflects the current state of: (a) Makefile targets, (b) Kconfig symbols and defaults, (c) output directory layout, (d) shipped defconfigs, and (e) entrypoint invocations. The `test_smoke.py` README verification checks (see §8 README Verification) provide a machine-checkable subset of this requirement; those checks should fail CI if the README falls out of sync with the implementation.
+
+**README pre-completion checklist** (verify before marking any milestone done):
+
+1. Every `make` target in the Makefile has a corresponding entry in the README's "make targets" section.
+2. Every Kconfig symbol with a non-obvious default or user-visible effect is documented (at least by name) in the README.
+3. The output directory layout described in the README matches the actual paths emitted by `make show-paths`.
+4. All shipped defconfigs (`defconfig`, `defconfig.min_depth`, `defconfig.fewshot_parallel_hybrid_ext`, `defconfig.train_grpo`, `defconfig.train_overfit_poc`) are listed and briefly described.
+5. Entrypoint invocations (`make run`, `make train-grpo`, `make test-trained-best`, etc.) match the Makefile and the prose in §9 (Expected Workflow).
 
 **Targets:**
 - `make menuconfig` — checks for `kconfiglib`, then opens the terminal-based Kconfig GUI via `tools/menuconfig.py`, writes `.config`.
 - `make defconfig` — copies shipped defaults (standard mode) to `.config`.
-- `make run` — full pipeline (start server, compute embeddings, run reasoning, collect DAG stats if enabled, stop server).
-- `make run-baseline` — copies `defconfig.min_depth` to `.config` (overwriting), then runs the full pipeline with the min-depth baseline prompt. Results and stats are written to separate output files to avoid overwriting standard results.
-- `make run-baseline-fewshot-ph-ext` — copies `defconfig.fewshot_parallel_hybrid_ext` to `.config`, then runs with the parallel+hybrid extended few-shot set (standard prompt, different `{fewshot}`). Results → `output/results_fewshot_ph_ext.jsonl`, stats → `output/dag_stats_fewshot_ph_ext.json`.
+- `make run` — full inference/evaluation pipeline (start server, compute embeddings, run reasoning, collect DAG stats if enabled, stop server). **Evaluates only the configured test split.** When `SPLIT_MODE_EXPLICIT_INDICES` is active, exactly the examples specified by the `CONFIG_SPLIT_TEST_*_INDICES` symbols are processed; when `SPLIT_MODE_SEEDED_RATIO` is active, the test portion of the seeded split is used. Train and validation examples are never processed.
+- `make run-baseline` — runs the full pipeline using the **current `.config`** with CLI overrides that set `CONFIG_DAG_PROMPT_VARIANT=DAG_PROMPT_MIN_DEPTH_BASELINE` and redirect outputs to `output/results_min_depth.jsonl` / `output/dag_stats_min_depth.json`. **Preserves** all dataset, split, and other settings from the active `.config`. **Evaluates only the configured test split.**
+- `make run-baseline-fewshot-ph-ext` — runs the full pipeline using the **current `.config`** with CLI overrides that set `CONFIG_FEWSHOT_VARIANT=FEWSHOT_PARALLEL_HYBRID_EXTENDED` and redirect outputs. **Preserves** all dataset, split, and other settings. **Evaluates only the configured test split.** Results → `output/results_fewshot_ph_ext.jsonl`, stats → `output/dag_stats_fewshot_ph_ext.json`.
 - `make server-start` / `make server-stop` — manual server lifecycle.
-- `make download` — download and cache both models **without** starting the SGLang server (uses `huggingface_hub.snapshot_download`).
+- `make download` — download both models to the persistent HF model cache on Volume disk **without** starting the SGLang server (uses `huggingface_hub.snapshot_download`).
 - `make test` — run test suite.
-- `make clean` — remove `.config` and caches.
+- `make clean` — remove `.config` and Python bytecode caches only. Does **not** delete persistent Volume-backed artifacts (outputs, checkpoints, model cache, curves, embedding cache).
+- `make clean-all` — **destructive**: removes `.config`, bytecode caches, and project-local persistent artifacts (`output/`, `cache/`, `.sglang.pid`). This deletes inference results, DAG stats, training checkpoints, curves, the persistent embedding cache, and per-step JSONL stats. Does **not** delete the HF model cache (`CONFIG_MODEL_CACHE_DIR`, typically `/workspace/.cache/huggingface`); to reclaim model cache space, delete it manually.
 - `make train` — run training using the current `.config` (whatever mode is configured: GRPO or overfit PoC). Calls `python -m src.training.train_main --config .config`.
 - `make train-grpo` — copies `defconfig.train_grpo` to `.config` and runs GRPO training.
 - `make train-overfit-poc` — copies `defconfig.train_overfit_poc` to `.config` and runs the small-sample overfit PoC.
-- `make resume-train` — resumes training from the latest checkpoint found in `CONFIG_TRAIN_OUTPUT_DIR` using the current `.config`.
+- `make resume-train` — resumes training from the most recent valid checkpoint in `CONFIG_TRAIN_OUTPUT_DIR`. Reads `checkpoint_index.json` and uses the `latest` entry by default. If `latest` is invalid/corrupt, falls back to previous checkpoints in reverse chronological order. To resume from a specific checkpoint, set `CONFIG_TRAIN_CHECKPOINT_PATH` in `.config` or pass `--checkpoint-path` on the CLI. Validates config compatibility before continuing (see §12d-ii). Stats and curves append to existing files.
+- `make test-trained` — evaluate the trained checkpoint selected by `CONFIG_TEST_TRAINED_CHECKPOINT_SOURCE` on the **test split only**. Resolves the checkpoint via `checkpoint_resolver.py`, starts the SGLang server with the trained model, runs the inference pipeline on the test split, and writes results/stats to dedicated output paths under `CONFIG_TRAIN_OUTPUT_DIR` (e.g. `output/train_grpo/test_best/`). This is the recommended post-training evaluation path.
+- `make test-trained-best` — force evaluation of the **best** checkpoint (overrides `CONFIG_TEST_TRAINED_CHECKPOINT_SOURCE` with `best`). Equivalent to `make test-trained` with `--checkpoint best`.
+- `make test-trained-latest` — force evaluation of the **latest** checkpoint (overrides `CONFIG_TEST_TRAINED_CHECKPOINT_SOURCE` with `latest`).
 - `make compile-curves` — manually triggers TeX compilation of all learning curve PDFs from the current training output directory.
-- `make show-train-config` — prints all training-related config symbols from `.config` (grep for `CONFIG_TRAIN`, `CONFIG_GRPO`, `CONFIG_REWARD`, `CONFIG_OVERFIT`, `CONFIG_GLOBAL_SEED`, `CONFIG_TRAINING`).
+- `make show-paths` — loads `.config` via `src.config`, resolves all paths, and prints them. Prints `PROJECT_DIR` (immutable module root for prompts/vendored files), `PERSISTENT_ROOT` (output/cache root), `MODEL_CACHE_DIR` (`HF_HOME`), `HUB_CACHE` (`$HF_HOME/hub/`), `EMBEDDING_CACHE`, `RESULT_FILE`, `TRAIN_OUTPUT_DIR`, `TRAIN_CURVES_DIR`, `EPHEMERAL_TMPDIR`, `SPLIT_MODE`, `INFERENCE_DATASET_PATH`, and the effective `HF_HOME`/`TRANSFORMERS_CACHE` as set by `config.py`. Use to verify all persistent paths resolve under `/workspace/` and prompt paths resolve under `PROJECT_DIR`.
+- `make show-train-config` — prints all training-related, split-related, and test-trained config symbols from `.config` (grep for `CONFIG_TRAIN`, `CONFIG_GRPO`, `CONFIG_REWARD`, `CONFIG_OVERFIT`, `CONFIG_GLOBAL_SEED`, `CONFIG_TRAINING`, `CONFIG_SPLIT`, `CONFIG_TEST_TRAINED`).
 
 #### `requirements.txt`
 
@@ -213,6 +283,9 @@ peft>=0.13.0
 bitsandbytes>=0.44.0
 accelerate>=1.0.0
 datasets>=3.0.0
+trl>=0.12.0
+jinja2>=3.1.0
+rich>=13.0.0
 ```
 
 **Dependency pinning notes:**
@@ -220,14 +293,21 @@ datasets>=3.0.0
 - `torch` and `transformers` are pinned with upper bounds to stay within a known-good range compatible with SGLang and sentence-transformers. Adjust the upper bounds when upgrading SGLang.
 - `scipy<1.15.0` avoids regressions in sparse-matrix APIs that some downstream code relies on.
 - `huggingface_hub` is added explicitly for `snapshot_download` in the download-only path.
-- These are **conservative pins** for a known-good stack. Before upgrading any package, verify it against the full `torch → transformers → sentence-transformers → sglang` dependency chain. Running `pip check` after install is recommended.
+- These are **conservative pins** for a known-good stack. Before upgrading any package, verify it against the full `torch → transformers → trl → sentence-transformers → sglang` dependency chain. Running `pip check` after install is recommended.
 - **Training dependencies:**
+  - `trl` provides the `GRPOTrainer` and `GRPOConfig` used for the GRPO training loop. The project delegates grouped generation, advantage normalization, clipped surrogate loss, KL penalty, and optimizer orchestration to TRL, providing only the project-specific reward function and dataset. Version ≥0.12.0 required for `GRPOTrainer` with `reward_funcs` interface.
   - `peft` provides LoRA/QLoRA adapter construction. Version ≥0.13.0 required for `prepare_model_for_kbit_training` compatibility with recent transformers.
   - `bitsandbytes` provides 4-bit NF4 quantization for QLoRA. Requires CUDA toolkit on the system.
-  - `accelerate` is required by `peft` and `bitsandbytes` for model preparation and mixed-precision utilities.
-  - `datasets` provides efficient dataset loading, mapping, and shuffling with deterministic seeding.
-  - **`trl` is NOT used.** GRPO is implemented manually in `src/training/grpo_trainer.py` to avoid the large `trl` dependency tree and to maintain full control over the training loop, reward computation, and logging.
-  - **`matplotlib` is NOT used.** All learning curves are maintained as TeX/PGFPlots artifacts compiled to PDF; no Python plotting library is needed at runtime.
+  - `accelerate` is required by `peft`, `bitsandbytes`, and TRL for model preparation, mixed-precision utilities, and Trainer-native checkpointing.
+  - `datasets` provides efficient dataset loading, mapping, selection, concatenation, and shuffling with deterministic seeding. Used for split construction and GRPO prompt dataset formatting.
+- **Templating:** `jinja2` renders DAG prompt templates and TeX learning curve templates, replacing manual string formatting.
+- **Console UX:** `rich` provides rich console output, structured tracebacks, and progress bars. `tqdm` is kept as a fallback for non-interactive/CI environments.
+- **`matplotlib` is NOT used.** All learning curves are maintained as TeX/PGFPlots artifacts compiled to PDF; no Python plotting library is needed at runtime.
+
+**Non-Python system requirements (not pip-installable):**
+- **`pdflatex` or `latexmk` + TeX Live** — required for learning curve PDF compilation during training. Training continues if absent (compilation failures are non-fatal and logged), but curve PDFs will not be generated. Install via `apt-get install texlive-latex-base texlive-pictures latexmk` or equivalent.
+- **CUDA toolkit + compatible GPU drivers** — required for `bitsandbytes` 4-bit quantization (QLoRA training) and SGLang GPU serving. CPU-only mode is not supported for inference or training.
+- **Standard shell utilities** — `lsof` or `ss` (used by `sglang_server.py` for port-conflict diagnostics; optional, diagnostics degrade gracefully if absent).
 
 ### 3. Kconfig Schema
 
@@ -238,12 +318,14 @@ mainmenu "AixelAsk Local Pipeline Configuration"
 source "Kconfig.model"
 source "Kconfig.server"
 source "Kconfig.dataset"
+source "Kconfig.split"
 source "Kconfig.retrieval"
 source "Kconfig.output"
 source "Kconfig.runtime"
 source "Kconfig.dagstats"
 source "Kconfig.training"
 source "Kconfig.training_stats"
+source "Kconfig.test_trained"
 ```
 
 #### `Kconfig.model`
@@ -253,9 +335,11 @@ source "Kconfig.training_stats"
 | `CONFIG_INFERENCE_MODEL` | string | `"mistralai/Mistral-7B-Instruct-v0.3"` | `--model-path` for SGLang |
 | `CONFIG_INFERENCE_MODEL_REVISION` | string | `"main"` | HF revision (passed to `snapshot_download` and SGLang) |
 | `CONFIG_EMBEDDING_MODEL` | string | `"nomic-ai/nomic-embed-text-v1"` | `SentenceTransformer(...)` model name |
-| `CONFIG_MODEL_CACHE_DIR` | string | `"~/.cache/huggingface/hub"` | `HF_HOME` / `TRANSFORMERS_CACHE` env |
+| `CONFIG_MODEL_CACHE_DIR` | string | `"/workspace/.cache/huggingface"` | Hugging Face cache root directory. Set as `HF_HOME` and `TRANSFORMERS_CACHE` env vars by `config.py` at startup. All HF libraries — including `snapshot_download`, `AutoModelForCausalLM.from_pretrained`, `SentenceTransformer`, and SGLang (which inherits the env var as a subprocess) — then use `$HF_HOME/hub/` as the model hub cache by default. Code must **not** pass `cache_dir` explicitly; rely on the env var so every consumer resolves the same path. **Must be on the persistent Volume disk** (see §17); defaults under `/workspace` so models survive Pod restarts. |
 | `CONFIG_TRUST_REMOTE_CODE` | bool | `y` | `--trust-remote-code` for nomic |
 | `CONFIG_NOMIC_PREFIX_MODE` | choice | `AUTO` | How the embedding client prepends `search_query:` / `search_document:` prefixes |
+
+**Model identity rule:** `CONFIG_INFERENCE_MODEL` serves as the **base model identity** for both inference and training. During inference, SGLang serves this model directly. During training, `lora_factory.build_model_and_tokenizer()` loads it as the base model and attaches LoRA adapters. During post-training test evaluation (`make test-trained`), `test_main.py` overrides the SGLang model path with the resolved checkpoint; the original `CONFIG_INFERENCE_MODEL` value is used only to load the base model for adapter merging if needed. This symbol always refers to the base model identity, never to a checkpoint. See §12 for the complete training/inference/evaluation model flow.
 
 **`CONFIG_NOMIC_PREFIX_MODE` choices:**
 
@@ -289,13 +373,110 @@ The embedding client's `embed_one(text) -> list[float]` function (which replaces
 
 | Symbol | Type | Default | Maps to |
 |--------|------|---------|---------|
-| `CONFIG_DATASET` | choice | `DATASET_WIKITQ_4K` | Which dataset to use |
-| `CONFIG_DATASET_WIKITQ_4K` | bool | (default) | `dataset/WikiTQ-4k/valid.jsonl` |
-| `CONFIG_DATASET_WIKITQ_PLUS` | bool | | `dataset/WikiTQ+/valid.jsonl` |
-| `CONFIG_DATASET_SCALABILITY` | bool | | Scalability sub-menu |
-| `CONFIG_DATASET_CUSTOM_PATH` | string | `""` | Custom .jsonl path (overrides choice) |
+| `CONFIG_DATASET` | choice | `DATASET_WIKITQ_4K` | Which dataset family to use (documentation/display; actual data loading uses the path symbols below) |
+| `CONFIG_DATASET_WIKITQ_4K` | bool | (default) | WikiTQ-4k family |
+| `CONFIG_DATASET_WIKITQ_PLUS` | bool | | WikiTQ+ family |
+| `CONFIG_DATASET_SCALABILITY` | bool | | Scalability family (**`SPLIT_MODE_EXPLICIT_INDICES` only**; multi-file dataset cannot be used with seeded-ratio mode) |
+| `CONFIG_INFERENCE_DATASET_PATH` | string | `"dataset/WikiTQ-4k/test.jsonl"` | Path to the JSONL file used for inference/evaluation (`make run`, baselines, `make test-trained`). Defaults to the **test** split of the selected dataset family. In `SPLIT_MODE_EXPLICIT_INDICES`, this is ignored (test examples come from the per-dataset index lists instead). |
 
-**TabFact+ is intentionally excluded from this module.** TabFact+ is a fact-verification task with a different input format (statements, not questions) and requires separate prompt templates, few-shot examples, and reasoning scripts. This module supports only table-QA datasets (WikiTQ-4k, WikiTQ+, Scalability, or a custom dataset in the same QA format). If `CONFIG_DATASET_CUSTOM_PATH` points to a TabFact+ file (detected by the path containing `"tabfact"` case-insensitively), `src/config.py` raises a clear error at startup (see §4 `src/config.py`).
+**TabFact+ is intentionally excluded from this module.** TabFact+ is a fact-verification task with a different input format (statements, not questions) and requires separate prompt templates, few-shot examples, and reasoning scripts. This module supports only table-QA datasets (WikiTQ-4k, WikiTQ+, Scalability, or a custom single-file QA dataset). If any resolved dataset path contains `"tabfact"` (case-insensitive substring), `src/config.py` raises a clear error at startup (see §4 `src/config.py`).
+
+**Interaction with split mode (`Kconfig.split`):** When `CONFIG_SPLIT_MODE=SPLIT_MODE_EXPLICIT_INDICES`, the `CONFIG_DATASET` choice is for documentation/display only — data is loaded from the canonical per-dataset registry instead (see `Kconfig.split` and `dataset_registry.py`). `CONFIG_INFERENCE_DATASET_PATH` and `CONFIG_TRAIN_DATASET_PATH` are not used for data loading in that mode. When `CONFIG_SPLIT_MODE=SPLIT_MODE_SEEDED_RATIO`, inference uses `CONFIG_INFERENCE_DATASET_PATH` and training uses `CONFIG_TRAIN_DATASET_PATH` / `CONFIG_TRAIN_DEV_DATASET_PATH` directly — each is an independent, explicit path symbol with no hidden coupling.
+
+#### `Kconfig.split`
+
+This menu controls how train, validation, and test splits are constructed. It supports three modes — seeded ratio (legacy default), explicit per-dataset indices, and overfit PoC — and is authoritative for all split decisions.
+
+**Split mode:**
+
+| Symbol | Type | Default | Description |
+|--------|------|---------|-------------|
+| `CONFIG_SPLIT_MODE` | choice | `SPLIT_MODE_SEEDED_RATIO` | How train/validation/test splits are constructed |
+
+**`CONFIG_SPLIT_MODE` choices:**
+
+| Choice | Description |
+|--------|-------------|
+| `SPLIT_MODE_SEEDED_RATIO` (default) | Training loads `CONFIG_TRAIN_DATASET_PATH` and optionally splits into train/dev using `CONFIG_TRAIN_SPLIT_RATIO` with `CONFIG_TRAIN_SPLIT_SEED`. Inference/evaluation (`make run`, baselines, `make test-trained*`) loads `CONFIG_INFERENCE_DATASET_PATH` (default: `dataset/WikiTQ-4k/test.jsonl`) — a completely separate file, not a held-out portion of the training data. This mode supports only single-file datasets (WikiTQ-4k, WikiTQ+, or a custom single-file QA dataset). |
+| `SPLIT_MODE_EXPLICIT_INDICES` | Build train/validation/test splits strictly from the per-dataset index lists below. Each split is the union of examples across supported datasets. The canonical dataset registry (`dataset_registry.py`) maps dataset keys to JSONL paths. |
+| `SPLIT_MODE_OVERFIT_POC` | Overfit-PoC subset selection (see §13). Uses `CONFIG_OVERFIT_POC_*` symbols. The selected tiny subset is used as train, validation, **and** test evaluation data. All evaluation in this mode — including `make test-trained` — operates on the same tiny subset. **Valid only when `CONFIG_TRAINING_MODE=TRAINING_MODE_OVERFIT_POC`.** If selected with `TRAINING_MODE_GRPO` or for inference (`CONFIG_ENABLE_TRAINING=n`), `config.py` raises a `ValueError`. |
+
+**Scalability restriction:** The Scalability dataset consists of multiple sub-files and cannot be used as a single-file dataset in `SPLIT_MODE_SEEDED_RATIO`. If `CONFIG_DATASET=DATASET_SCALABILITY` is selected with `SPLIT_MODE_SEEDED_RATIO`, `config.py` raises a `ValueError`: `"Scalability dataset requires SPLIT_MODE_EXPLICIT_INDICES (multi-file dataset)."` Scalability is fully supported in `SPLIT_MODE_EXPLICIT_INDICES` via the canonical dataset registry.
+
+**Per-dataset explicit index lists:**
+
+| Symbol | Type | Default | Description |
+|--------|------|---------|-------------|
+| `CONFIG_SPLIT_TRAIN_WIKITQ_4K_INDICES` | string | `""` | Comma-separated zero-based indices into `dataset/WikiTQ-4k/train.jsonl` for the **train** split |
+| `CONFIG_SPLIT_TRAIN_WIKITQ_PLUS_INDICES` | string | `""` | Comma-separated zero-based indices into `dataset/WikiTQ+/train.jsonl` for the **train** split |
+| `CONFIG_SPLIT_TRAIN_SCALABILITY_INDICES` | string | `""` | Comma-separated zero-based indices into the Scalability combined dataset for the **train** split |
+| `CONFIG_SPLIT_VALID_WIKITQ_4K_INDICES` | string | `""` | Comma-separated zero-based indices into `dataset/WikiTQ-4k/valid.jsonl` for the **validation** split |
+| `CONFIG_SPLIT_VALID_WIKITQ_PLUS_INDICES` | string | `""` | Comma-separated zero-based indices into `dataset/WikiTQ+/valid.jsonl` for the **validation** split |
+| `CONFIG_SPLIT_VALID_SCALABILITY_INDICES` | string | `""` | Comma-separated zero-based indices into the Scalability combined dataset for the **validation** split |
+| `CONFIG_SPLIT_TEST_WIKITQ_4K_INDICES` | string | `""` | Comma-separated zero-based indices into `dataset/WikiTQ-4k/test.jsonl` for the **test** split |
+| `CONFIG_SPLIT_TEST_WIKITQ_PLUS_INDICES` | string | `""` | Comma-separated zero-based indices into `dataset/WikiTQ+/test.jsonl` for the **test** split |
+| `CONFIG_SPLIT_TEST_SCALABILITY_INDICES` | string | `""` | Comma-separated zero-based indices into the Scalability combined dataset for the **test** split |
+
+**Index semantics:**
+
+- Indices are **zero-based** and refer to the **canonical order** (line number minus one) in the source JSONL for that dataset.
+- An **empty string** means that dataset contributes no examples to that split.
+- Whitespace around commas is allowed and stripped during parsing.
+- Empty tokens (e.g. from trailing commas or `"1,,3"`) are silently ignored.
+- Non-integer tokens raise a clear parse error at startup naming the offending token and symbol.
+- Duplicate indices within the same list are deduplicated (only the first occurrence is kept).
+- After dedup, indices are sorted ascending for deterministic ordering.
+- **Out-of-range** indices (negative, or ≥ number of examples in the source JSONL) raise a clear error at startup naming the offending `(dataset, index)` pair.
+- **TabFact+** remains excluded: there are no TabFact+ index symbols, and no mechanism to include TabFact+ examples. This is deliberate and matches the overall TabFact+ exclusion policy.
+
+**Cross-split overlap prohibition:**
+
+When `SPLIT_MODE_EXPLICIT_INDICES` is active, train/validation/test splits must be **disjoint by `(dataset, index)` pair**. If the same `(dataset, index)` appears in more than one split, `config.py` raises a `ValueError` at startup listing all offending pairs. This prevents data leakage from train/validation into test, which would invalidate evaluation results.
+
+**Split role semantics:**
+
+| Split | Used for | NOT used for |
+|-------|----------|--------------|
+| **Train** | GRPO optimizer batches (gradient updates, reward optimization, policy improvement) | Final reported evaluation; inference/baseline runs |
+| **Validation** | Periodic training-time evaluation and monitoring; best-checkpoint selection (`CONFIG_TRAIN_SAVE_BEST_BY`); diagnostic curves and per-eval stats | Gradient updates; optimizer steps; reward optimization targets; final reported evaluation; inference/baseline runs; `make run` / `make test-trained` |
+| **Test** | Final reported evaluation (`make run`, `make run-baseline`, `make run-baseline-fewshot-ph-ext`, `make test-trained*`) | Training of any kind; periodic training-time evaluation |
+
+The validation split is evaluated under no-gradient inference mode only (no `loss.backward()`, no optimizer updates). Validation metrics (e.g. `eval_reward_mean`) may drive best-checkpoint selection via `CONFIG_TRAIN_SAVE_BEST_BY`, but they never influence training updates. Validation examples must never appear in final evaluation results.
+
+**Empty split rules:**
+
+| Situation | Behavior |
+|-----------|----------|
+| Empty test split when `CONFIG_ENABLE_TRAINING=n` (inference/baseline) | Startup raises `ValueError("Explicit test split is empty; inference/baseline runs require at least one test example.")` |
+| Empty train split when `CONFIG_ENABLE_TRAINING=y` (training) | Startup raises `ValueError("Explicit train split is empty; training requires at least one training example.")` |
+| Empty validation split when training | Allowed: training proceeds without periodic evaluation (a warning is logged). Best-checkpoint selection via validation metric is disabled; only `latest` checkpoints are saved. The `latest` checkpoint remains valid for post-training evaluation via `make test-trained-latest`. |
+
+**Canonical dataset registry:**
+
+The following canonical JSONL sources are used for explicit-index selection. Paths are resolved against the AixelAsk repo root (`/workspace/AixelAsk/AixelAsk`).
+
+| Dataset key | Canonical JSONL path (relative to repo root) | Line count | Notes |
+|-------------|----------------------------------------------|------------|-------|
+| `wikitq_4k` (train split) | `dataset/WikiTQ-4k/train.jsonl` | — | Full WikiTQ-4k training set |
+| `wikitq_4k` (valid split) | `dataset/WikiTQ-4k/valid.jsonl` | — | WikiTQ-4k validation set |
+| `wikitq_4k` (test split) | `dataset/WikiTQ-4k/test.jsonl` | — | WikiTQ-4k test set |
+| `wikitq_plus` (train split) | `dataset/WikiTQ+/train.jsonl` | — | WikiTQ+ training set |
+| `wikitq_plus` (valid split) | `dataset/WikiTQ+/valid.jsonl` | — | WikiTQ+ validation set |
+| `wikitq_plus` (test split) | `dataset/WikiTQ+/test.jsonl` | — | WikiTQ+ test set |
+| `scalability` (all splits) | `dataset/Scalability/*.jsonl` (combined) | — | Scalability sub-files concatenated in lexicographic order: `0-1k.jsonl`, `1k-2k.jsonl`, `2k-3k.jsonl`, `3k-4k.jsonl`, `4k-5k.jsonl`, `5k+.jsonl`. Indices are into this combined virtual file. |
+
+**Scalability handling:** The Scalability dataset is **not** a single flat JSONL file — it consists of six sub-files bucketed by table-token count. For explicit-index selection, `dataset_registry.py` concatenates these files in **lexicographic filename order** (`0-1k.jsonl`, `1k-2k.jsonl`, `2k-3k.jsonl`, `3k-4k.jsonl`, `4k-5k.jsonl`, `5k+.jsonl`) into a single logical sequence. Index `0` is the first line of `0-1k.jsonl`; indices continue sequentially through the files. The registry records the per-file offsets so that a given index can be mapped back to its source sub-file and line number for auditability. If any sub-file is missing, `dataset_registry.py` raises a clear error at startup listing the missing path.
+
+**Per-example metadata preservation:**
+
+When `SPLIT_MODE_EXPLICIT_INDICES` is active, every example loaded into any split carries two metadata fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `source_dataset` | string | Dataset key: `"wikitq_4k"`, `"wikitq_plus"`, or `"scalability"` |
+| `source_index` | int | Zero-based index into the canonical JSONL for that dataset |
+
+These fields are preserved through the pipeline (training and inference) and written to output JSONL records so that analysis can recover exactly which source example produced each result. When `SPLIT_MODE_SEEDED_RATIO` is active, `source_dataset` is derived from the selected `CONFIG_DATASET` choice and `source_index` is the line index in the loaded file.
 
 #### `Kconfig.retrieval`
 
@@ -305,7 +486,7 @@ The embedding client's `embed_one(text) -> list[float]` function (which replaces
 | `CONFIG_DAG_MAX_RETRIES` | int | `10` | `max_attempts` in `generate_dag.py` |
 | `CONFIG_DAG_PROMPT_VARIANT` | choice | `DAG_PROMPT_STANDARD` | Selects which shipped DAG prompt template to use |
 | `CONFIG_PLAN_PROMPT` | string | `""` | Manual override for DAG prompt template path. If non-empty, overrides `CONFIG_DAG_PROMPT_VARIANT`. If empty (default), `patch_dag.py` resolves the path from `CONFIG_DAG_PROMPT_VARIANT`. |
-| `CONFIG_FEWSHOT_VARIANT` | choice | `FEWSHOT_STANDARD_ALL3` | Selects which set of few-shot files populates `{fewshot}` at runtime |
+| `CONFIG_FEWSHOT_VARIANT` | choice | `FEWSHOT_STANDARD_ALL3` | Selects which set of few-shot files populates `{{ fewshot }}` at runtime |
 
 **`CONFIG_DAG_PROMPT_VARIANT` choices:**
 
@@ -323,7 +504,7 @@ The embedding client's `embed_one(text) -> list[float]` function (which replaces
 | `FEWSHOT_STANDARD_ALL3` (default) | `prompt/fewshot/fewshot_parallel.txt`, `prompt/fewshot/fewshot_sequential.txt`, `prompt/fewshot/fewshot_hybrid.txt` | All 3 reasoning types (parallel + sequential + hybrid). 6 examples total. |
 | `FEWSHOT_PARALLEL_HYBRID_EXTENDED` | `prompt/fewshot/fewshot_parallel.txt`, `prompt/fewshot/fewshot_hybrid.txt`, `prompt/fewshot/fewshot_parallel_extended.txt`, `prompt/fewshot/fewshot_hybrid_extended.txt` | Parallel + hybrid only, including extended files. No sequential examples. |
 
-**Few-shot independence:** `CONFIG_FEWSHOT_VARIANT` controls **only** the `{fewshot}` content injected at runtime. It does **not** change the prompt template text (`prompt/get_dag.md` or `prompt/get_dag_min_depth.md`). Min-depth baseline changes the prompt instruction line; few-shot baseline changes only the examples shown. The two knobs are orthogonal and can be combined freely (e.g. min-depth prompt + parallel/hybrid extended few-shot).
+**Few-shot independence:** `CONFIG_FEWSHOT_VARIANT` controls **only** the `{{ fewshot }}` content injected at runtime. It does **not** change the prompt template text (`prompt/get_dag.md` or `prompt/get_dag_min_depth.md`). Min-depth baseline changes the prompt instruction line; few-shot baseline changes only the examples shown. The two knobs are orthogonal and can be combined freely (e.g. min-depth prompt + parallel/hybrid extended few-shot).
 
 **TabFact+ exclusion:** Neither variant includes `fewshot_tabfact.txt`. TabFact+ is a fact-verification task and is excluded from this module entirely (see §3 `Kconfig.dataset`).
 
@@ -340,8 +521,12 @@ The embedding client's `embed_one(text) -> list[float]` function (which replaces
 
 | Symbol | Type | Default | Maps to |
 |--------|------|---------|---------|
+| `CONFIG_PERSISTENT_ROOT` | string | `"/workspace/AixelAsk/nlp_project"` | Root for all persistent **output/cache/checkpoint** artifacts. Must be on the Runpod Volume disk (see §17). All relative output/cache/checkpoint paths are resolved relative to this. Note: vendored prompt templates and other repo-local files resolve against `PROJECT_DIR` instead (see below) |
+| `CONFIG_EPHEMERAL_TMPDIR` | string | `"/tmp"` | Root for temporary/scratch files that need not survive Pod restarts (TeX compile scratch, transient downloads) |
+
+**`PROJECT_DIR` (derived constant, not a Kconfig symbol):** Set by `config.py` to `os.path.dirname(os.path.dirname(os.path.abspath(__file__)))` — the `nlp_project/` directory on disk that contains `src/`, `prompt/`, `Makefile`, and `README.md`. It is **immutable** and independent of `CONFIG_PERSISTENT_ROOT`. Vendored prompt templates, `.sglang.pid`, `tools/`, and the `prompt/fewshot/` directory are resolved against `PROJECT_DIR`. This separation ensures that changing `CONFIG_PERSISTENT_ROOT` to redirect outputs (e.g. `/workspace/custom_output`) does not break prompt file resolution.
 | `CONFIG_RESULT_FILE` | string | `"output/results.jsonl"` | Where final results are written (see §4b for extended schema) |
-| `CONFIG_EMBEDDING_CACHE` | string | `"cache/table_embeddings.jsonl"` | Precomputed embedding cache |
+| `CONFIG_EMBEDDING_CACHE` | string | `"cache/table_embeddings.jsonl"` | Precomputed embedding cache (persistent on Volume disk; resolved relative to `CONFIG_PERSISTENT_ROOT`) |
 | `CONFIG_LOG_FILE` | string | `"output/run.log"` | Log file path |
 | `CONFIG_LOG_LEVEL` | choice | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
 | `CONFIG_LOG_LLM_PROMPTS` | bool | `n` | When `y`, store the **exact** prompt text sent to the LLM for each call inside the results JSONL (see §4b `llm_calls[].prompt`). Also logs prompts at `DEBUG` level to `CONFIG_LOG_FILE`. |
@@ -351,6 +536,32 @@ The embedding client's `embed_one(text) -> list[float]` function (which replaces
 | `CONFIG_LLM_CALLS_SIDEFILE` | string | `""` | If non-empty, write a **separate** JSONL file at this path with one record per LLM call (flat, not nested inside items). Useful for analysis tools that want one-call-per-line. Each record includes the item `index` and `question` for join-ability. |
 
 **Coupling rule:** `CONFIG_LOG_LLM_RESPONSES` defaults to `n` but is forced to `y` whenever `CONFIG_LOG_LLM_PROMPTS=y` (a prompt without its response is rarely useful). This is enforced via a Kconfig `select` or at config-parse time.
+
+**Path resolution rule:** At config-parse time, `config.py` first derives empty training paths from `CONFIG_TRAIN_OUTPUT_DIR` (see `Kconfig.training_stats` derivation rule), then resolves all relative paths against `CONFIG_PERSISTENT_ROOT`. The complete list of symbols resolved:
+
+- `CONFIG_MODEL_CACHE_DIR`
+- `CONFIG_RESULT_FILE`
+- `CONFIG_EMBEDDING_CACHE`
+- `CONFIG_LOG_FILE`
+- `CONFIG_DAG_STATS_FILE`
+- `CONFIG_LLM_CALLS_SIDEFILE`
+- `CONFIG_TRAIN_OUTPUT_DIR`
+- `CONFIG_TRAIN_STATS_FILE` (after derivation from `CONFIG_TRAIN_OUTPUT_DIR` if empty)
+- `CONFIG_TRAIN_STATS_PER_STEP_JSONL` (after derivation)
+- `CONFIG_TRAIN_STATS_PER_EVAL_JSONL` (after derivation)
+- `CONFIG_TRAIN_CURVES_DIR` (after derivation)
+- `CONFIG_TRAIN_CHECKPOINT_PATH`
+- `CONFIG_OVERFIT_POC_INDICES_FILE` (if relative)
+- `CONFIG_TEST_TRAINED_OUTPUT_DIR` (after derivation from `CONFIG_TRAIN_OUTPUT_DIR` + checkpoint source)
+- `CONFIG_TEST_TRAINED_RESULT_FILE` (after derivation from `CONFIG_TEST_TRAINED_OUTPUT_DIR`)
+- `CONFIG_TEST_TRAINED_DAG_STATS_FILE` (after derivation)
+- `CONFIG_TEST_TRAINED_CHECKPOINT_PATH`
+
+**Prompt path resolution:** Prompt paths (`CONFIG_FINAL_REASONING_PROMPT`, `CONFIG_NOPLAN_REASONING_PROMPT`, `CONFIG_ROW_PROMPT`, `CONFIG_COL_PROMPT`, `CONFIG_SCHEMA_LINKING_PROMPT`, `CONFIG_PLAN_PROMPT`, and the few-shot file list from `CONFIG_FEWSHOT_VARIANT`) are resolved relative to `PROJECT_DIR` (the immutable module root on disk), since prompts are vendored under `nlp_project/prompt/` and must not move when the user redirects outputs via `CONFIG_PERSISTENT_ROOT`. This is distinct from output/cache paths (which resolve against `CONFIG_PERSISTENT_ROOT`) and dataset paths (which resolve against the upstream AixelAsk repo root).
+
+This ensures all important artifacts are written to the persistent Volume disk by default. Only `CONFIG_EPHEMERAL_TMPDIR` points to Container disk scratch space (see §17).
+
+**Dataset path resolution:** Dataset paths (`CONFIG_INFERENCE_DATASET_PATH`, `CONFIG_TRAIN_DATASET_PATH`, `CONFIG_TRAIN_DEV_DATASET_PATH`) are resolved against the **AixelAsk repo root** (`/workspace/AixelAsk/AixelAsk`) if relative, since datasets ship with the upstream repo. Absolute paths are used as-is. Any locally staged dataset copies must go under `/workspace`, never Container disk. When `CONFIG_SPLIT_MODE=SPLIT_MODE_EXPLICIT_INDICES`, the canonical dataset registry (`dataset_registry.py`) resolves per-dataset JSONL paths against the same AixelAsk repo root; `CONFIG_INFERENCE_DATASET_PATH` / `CONFIG_TRAIN_DATASET_PATH` / `CONFIG_TRAIN_DEV_DATASET_PATH` are not used for data loading in that mode.
 
 #### `Kconfig.runtime`
 
@@ -381,7 +592,7 @@ The embedding client's `embed_one(text) -> list[float]` function (which replaces
 | `CONFIG_CUDA_VISIBLE_DEVICES` | string | `""` | If non-empty, set as `CUDA_VISIBLE_DEVICES` env var before launching SGLang and loading the embedding model. Empty string means inherit from environment. Example: `"0"` for single-GPU, `"0,1"` for 2-GPU TP. |
 | `CONFIG_DAG_NODE_MAX_INFLIGHT` | int | `16` | Maximum number of DAG nodes that may be executing concurrently **within a single item's DAG**. Limits frontier width to avoid overwhelming the LLM/embedding backends from a single item. |
 | `CONFIG_RETRIEVAL_PARALLELISM` | int | `8` | Maximum concurrent retrieval operations within a single DAG frontier. Each retrieval operation involves embedding + similarity search. |
-| `CONFIG_RETRIEVAL_EMBED_BATCH_SIZE` | int | `32` | Batch size for `embed_batch()` when multiple retrieval nodes in the same frontier are coalesced into a single embedding call. Defaults to `CONFIG_EMBEDDING_BATCH_SIZE`. |
+| `CONFIG_RETRIEVAL_EMBED_BATCH_SIZE` | int | `32` | Batch size for `embed_batch()` when multiple retrieval nodes in the same frontier are coalesced into a single embedding call. |
 | `CONFIG_REASONING_PARALLELISM` | int | `8` | Maximum concurrent LLM (reasoning) calls within a single DAG frontier. Concurrent calls to SGLang enable its continuous batching to maximize GPU utilization. |
 | `CONFIG_SGLANG_CLIENT_CONCURRENCY` | int | `32` | Global cap on outstanding HTTP requests to the SGLang server across **all** items and all threads. Implemented as a shared `threading.Semaphore`. Prevents HTTP connection exhaustion and balances memory pressure on the server. |
 | `CONFIG_GLOBAL_EMBEDDING_CONCURRENCY` | int | `4` | Global cap on concurrent `embed_batch` calls across all items. Since the embedding model runs on GPU, too many parallel encode calls cause OOM; this semaphore serializes access while still allowing cross-item overlap with LLM calls. |
@@ -407,7 +618,7 @@ The embedding client's `embed_one(text) -> list[float]` function (which replaces
 
 | Symbol | Type | Default | Description |
 |--------|------|---------|-------------|
-| `CONFIG_ENABLE_TRAINING` | bool | `n` | Master switch: when `y`, `src/main.py` dispatches to the training subsystem instead of the inference pipeline |
+| `CONFIG_ENABLE_TRAINING` | bool | `n` | Master switch: when `y`, `make train` and `make resume-train` are valid targets. `src/main.py` does not check this flag (it is inference-only). Used by `config.py` for validation rules (e.g. empty train split is an error only when `y`). |
 | `CONFIG_TRAINING_MODE` | choice | `TRAINING_MODE_DISABLED` | Selects training algorithm |
 
 **`CONFIG_TRAINING_MODE` choices:**
@@ -420,18 +631,20 @@ The embedding client's `embed_one(text) -> list[float]` function (which replaces
 
 **Dataset / split / overfit selection:**
 
+Split construction is governed by `CONFIG_SPLIT_MODE` (see `Kconfig.split`). The symbols below apply **only when `CONFIG_SPLIT_MODE=SPLIT_MODE_SEEDED_RATIO`** (the default). When `SPLIT_MODE_EXPLICIT_INDICES` is active, training data is loaded from the canonical per-dataset registry using the `CONFIG_SPLIT_TRAIN_*_INDICES` / `CONFIG_SPLIT_VALID_*_INDICES` symbols, and the symbols below are ignored. When `SPLIT_MODE_OVERFIT_POC` is active, the overfit-PoC symbols take precedence.
+
 | Symbol | Type | Default | Description |
 |--------|------|---------|-------------|
-| `CONFIG_TRAIN_DATASET_PATH` | string | `"dataset/WikiTQ-4k/valid.jsonl"` | Path to training data (JSONL, same format as inference datasets) |
-| `CONFIG_TRAIN_DEV_DATASET_PATH` | string | `""` | Explicit dev set path. If empty, split from training data using `CONFIG_TRAIN_SPLIT_RATIO` |
-| `CONFIG_TRAIN_USE_SEEDED_SPLIT` | bool | `y` | When `y` and dev path is empty, create a stable seeded train/dev split |
-| `CONFIG_TRAIN_SPLIT_RATIO` | string | `"0.9"` | Fraction of data used for training (remainder → dev). Parsed as float |
-| `CONFIG_TRAIN_SPLIT_SEED` | int | `-1` | Seed for train/dev split RNG. `-1` = inherit from `CONFIG_GLOBAL_SEED` |
-| `CONFIG_TRAIN_MAX_TRAIN_EXAMPLES` | int | `0` | Cap on training examples. `0` = use all |
-| `CONFIG_TRAIN_MAX_DEV_EXAMPLES` | int | `0` | Cap on dev examples. `0` = use all |
-| `CONFIG_OVERFIT_POC_NUM_EXAMPLES` | int | `16` | Number of examples for overfit PoC |
-| `CONFIG_OVERFIT_POC_SELECTION_MODE` | choice | `FIRST_N` | How to select the tiny subset |
-| `CONFIG_OVERFIT_POC_INDICES_FILE` | string | `""` | Path to a file with explicit indices (one per line), used when `FIXED_INDICES_FILE` |
+| `CONFIG_TRAIN_DATASET_PATH` | string | `"dataset/WikiTQ-4k/train.jsonl"` | Path to training data (JSONL). **Used only in `SPLIT_MODE_SEEDED_RATIO`.** Defaults to the train split of the selected dataset family. |
+| `CONFIG_TRAIN_DEV_DATASET_PATH` | string | `""` | Explicit dev set path. If empty, split from training data using `CONFIG_TRAIN_SPLIT_RATIO`. **Used only in `SPLIT_MODE_SEEDED_RATIO`.** |
+| `CONFIG_TRAIN_USE_SEEDED_SPLIT` | bool | `y` | When `y` and dev path is empty, create a stable seeded train/dev split. **Used only in `SPLIT_MODE_SEEDED_RATIO`.** |
+| `CONFIG_TRAIN_SPLIT_RATIO` | string | `"0.9"` | Fraction of data used for training (remainder → dev). Parsed as float. **Used only in `SPLIT_MODE_SEEDED_RATIO`.** |
+| `CONFIG_TRAIN_SPLIT_SEED` | int | `-1` | Seed for train/dev split RNG. `-1` = inherit from `CONFIG_GLOBAL_SEED`. **Used only in `SPLIT_MODE_SEEDED_RATIO`.** |
+| `CONFIG_TRAIN_MAX_TRAIN_EXAMPLES` | int | `0` | Cap on training examples. `0` = use all. Applies in all split modes after split construction. |
+| `CONFIG_TRAIN_MAX_DEV_EXAMPLES` | int | `0` | Cap on dev examples. `0` = use all. Applies in all split modes after split construction. |
+| `CONFIG_OVERFIT_POC_NUM_EXAMPLES` | int | `16` | Number of examples for overfit PoC. **Used only in `SPLIT_MODE_OVERFIT_POC`.** |
+| `CONFIG_OVERFIT_POC_SELECTION_MODE` | choice | `FIRST_N` | How to select the tiny subset. **Used only in `SPLIT_MODE_OVERFIT_POC`.** |
+| `CONFIG_OVERFIT_POC_INDICES_FILE` | string | `""` | Path to a file with explicit indices (one per line), used when `FIXED_INDICES_FILE`. **Used only in `SPLIT_MODE_OVERFIT_POC`.** |
 
 **`CONFIG_OVERFIT_POC_SELECTION_MODE` choices:**
 
@@ -440,6 +653,8 @@ The embedding client's `embed_one(text) -> list[float]` function (which replaces
 | `FIRST_N` (default) | Take the first N examples from the dataset |
 | `RANDOM_SEEDED` | Sample N examples using `CONFIG_GLOBAL_SEED` |
 | `FIXED_INDICES_FILE` | Load explicit indices from `CONFIG_OVERFIT_POC_INDICES_FILE` |
+
+**Split mode compatibility:** When `CONFIG_TRAINING_MODE=TRAINING_MODE_OVERFIT_POC`, `CONFIG_SPLIT_MODE` is forced to `SPLIT_MODE_OVERFIT_POC` regardless of the Kconfig value (with a log warning if they differ). When `CONFIG_TRAINING_MODE=TRAINING_MODE_GRPO`, only `SPLIT_MODE_SEEDED_RATIO` and `SPLIT_MODE_EXPLICIT_INDICES` are valid; if `CONFIG_SPLIT_MODE=SPLIT_MODE_OVERFIT_POC` with `TRAINING_MODE_GRPO`, `config.py` raises a `ValueError("SPLIT_MODE_OVERFIT_POC is valid only with TRAINING_MODE_OVERFIT_POC, not TRAINING_MODE_GRPO.")`. For inference runs (`CONFIG_ENABLE_TRAINING=n`), `SPLIT_MODE_OVERFIT_POC` is rejected: `config.py` raises `ValueError("SPLIT_MODE_OVERFIT_POC is valid only for training (TRAINING_MODE_OVERFIT_POC). For inference, use SPLIT_MODE_SEEDED_RATIO or SPLIT_MODE_EXPLICIT_INDICES.")`.
 
 **Training reproducibility / seeds:**
 
@@ -455,27 +670,27 @@ The embedding client's `embed_one(text) -> list[float]` function (which replaces
 
 **Seed inheritance rule:** If a stage-specific seed is set to `-1` (the default), it inherits the value of `CONFIG_GLOBAL_SEED` at config-parse time. If set to a non-negative value, that value is used instead. This allows setting a single `CONFIG_GLOBAL_SEED=42` for full reproducibility, or overriding individual stages for ablation. The resolved seeds are written to `resolved_seeds.json` (if `CONFIG_SAVE_RESOLVED_SEEDS=y`) so that every run is fully auditable.
 
-**GRPO stage:**
+**GRPO stage (mapped to TRL `GRPOConfig` fields):**
 
-| Symbol | Type | Default | Description |
-|--------|------|---------|-------------|
-| `CONFIG_GRPO_ENABLE` | bool | `y` | Enable GRPO training (automatically `y` when mode is GRPO or OVERFIT_POC) |
-| `CONFIG_GRPO_NUM_EPOCHS` | int | `1` | Number of GRPO epochs over the prompt dataset |
-| `CONFIG_GRPO_MAX_STEPS` | int | `0` | Max GRPO steps. `0` = epoch-limited |
-| `CONFIG_GRPO_BATCH_SIZE_PROMPTS` | int | `4` | Number of prompts per batch |
-| `CONFIG_GRPO_GROUP_SIZE` | int | `8` | Number of completions sampled per prompt (M in GRPO) |
-| `CONFIG_GRPO_MAX_NEW_TOKENS` | int | `1024` | Maximum tokens generated per completion |
-| `CONFIG_GRPO_TEMPERATURE` | string | `"0.7"` | Sampling temperature during GRPO generation. Parsed as float |
-| `CONFIG_GRPO_TOP_P` | string | `"0.95"` | Nucleus sampling p. Parsed as float |
-| `CONFIG_GRPO_TOP_K` | int | `0` | Top-k sampling. `0` = disabled |
-| `CONFIG_GRPO_CLIP_EPS` | string | `"0.2"` | PPO-style clipping epsilon. Parsed as float |
-| `CONFIG_GRPO_KL_COEF` | string | `"0.05"` | KL penalty coefficient to reference model. Parsed as float |
-| `CONFIG_GRPO_LR` | string | `"5e-5"` | GRPO learning rate. Parsed as float |
-| `CONFIG_GRPO_GRAD_ACCUM` | int | `2` | Gradient accumulation steps for GRPO |
-| `CONFIG_GRPO_NORMALIZE_ADVANTAGES` | bool | `y` | Normalize advantages by group std (standard GRPO) |
-| `CONFIG_GRPO_EPSILON_STD` | string | `"1e-8"` | Epsilon added to group std to avoid division by zero. Parsed as float |
-| `CONFIG_GRPO_SAVE_EVERY_STEPS` | int | `50` | Save checkpoint every N GRPO steps |
-| `CONFIG_GRPO_EVAL_EVERY_STEPS` | int | `25` | Evaluate on dev set every N GRPO steps |
+All GRPO symbols below are mapped to corresponding `GRPOConfig` fields by `train_config.py`. The GRPO training loop itself is delegated to TRL's `GRPOTrainer`; these symbols configure its behavior via the standard TRL API.
+
+| Symbol | Type | Default | Maps to `GRPOConfig` field | Description |
+|--------|------|---------|---------------------------|-------------|
+| `CONFIG_GRPO_ENABLE` | bool | `y` | — | Enable GRPO training (automatically `y` when mode is GRPO or OVERFIT_POC) |
+| `CONFIG_GRPO_NUM_EPOCHS` | int | `1` | `num_train_epochs` | Number of GRPO epochs over the prompt dataset |
+| `CONFIG_GRPO_MAX_STEPS` | int | `0` | `max_steps` | Max GRPO steps. `0` = epoch-limited (set to `-1` in GRPOConfig) |
+| `CONFIG_GRPO_BATCH_SIZE_PROMPTS` | int | `4` | `per_device_train_batch_size` | Number of prompts per batch |
+| `CONFIG_GRPO_GROUP_SIZE` | int | `8` | `num_generations` | Number of completions sampled per prompt (M in GRPO) |
+| `CONFIG_GRPO_MAX_NEW_TOKENS` | int | `1024` | `max_completion_length` | Maximum tokens generated per completion |
+| `CONFIG_GRPO_TEMPERATURE` | string | `"0.7"` | `temperature` | Sampling temperature during GRPO generation. Parsed as float |
+| `CONFIG_GRPO_TOP_P` | string | `"0.95"` | — (passed via `generation_config`) | Nucleus sampling p. Parsed as float |
+| `CONFIG_GRPO_TOP_K` | int | `0` | — (passed via `generation_config`) | Top-k sampling. `0` = disabled |
+| `CONFIG_GRPO_CLIP_EPS` | string | `"0.2"` | `cliprange` | PPO-style clipping epsilon. Parsed as float |
+| `CONFIG_GRPO_KL_COEF` | string | `"0.05"` | `beta` | KL penalty coefficient to reference model. Parsed as float |
+| `CONFIG_GRPO_LR` | string | `"5e-5"` | `learning_rate` | GRPO learning rate. Parsed as float |
+| `CONFIG_GRPO_GRAD_ACCUM` | int | `2` | `gradient_accumulation_steps` | Gradient accumulation steps for GRPO |
+| `CONFIG_GRPO_SAVE_EVERY_STEPS` | int | `50` | `save_steps` | Save checkpoint every N GRPO steps (Trainer-native checkpointing) |
+| `CONFIG_GRPO_EVAL_EVERY_STEPS` | int | `25` | `eval_steps` | Evaluate on validation set every N GRPO steps (no-grad inference only; skipped if validation split is empty) |
 
 **Reward configuration:**
 
@@ -514,17 +729,17 @@ The embedding client's `embed_one(text) -> list[float]` function (which replaces
 | `CONFIG_TRAIN_LORA_DROPOUT` | string | `"0.05"` | LoRA dropout rate. Parsed as float |
 | `CONFIG_TRAIN_LORA_TARGET_MODULES` | string | `"q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj"` | Comma-separated list of module names to attach LoRA adapters |
 | `CONFIG_TRAIN_LORA_BIAS` | string | `"none"` | Bias handling: `"none"`, `"all"`, or `"lora_only"` |
-| `CONFIG_TRAIN_LOAD_FROM_CHECKPOINT` | bool | `n` | If `y`, resume training from an existing checkpoint |
-| `CONFIG_TRAIN_CHECKPOINT_PATH` | string | `""` | Path to checkpoint directory to resume from. If empty and `--resume` is passed, auto-detect latest in `CONFIG_TRAIN_OUTPUT_DIR` |
+| `CONFIG_TRAIN_LOAD_FROM_CHECKPOINT` | bool | `n` | If `y`, resume training from an existing checkpoint. See §12d-ii for resume precedence and config compatibility rules |
+| `CONFIG_TRAIN_CHECKPOINT_PATH` | string | `""` | Path to checkpoint directory to resume from. If empty and `--resume` is passed, auto-detect latest via `checkpoint_index.json` in `CONFIG_TRAIN_OUTPUT_DIR`. See §12d-ii for resolution order |
 
 **Checkpoint / model export:**
 
 | Symbol | Type | Default | Description |
 |--------|------|---------|-------------|
 | `CONFIG_TRAIN_OUTPUT_DIR` | string | `"output/train"` | Root directory for all training outputs (checkpoints, stats, curves) |
-| `CONFIG_TRAIN_SAVE_LATEST` | bool | `y` | Always overwrite a `latest/` checkpoint symlink |
-| `CONFIG_TRAIN_SAVE_BEST_BY` | string | `"eval_reward_mean"` | Metric to track for best-model saving. Must match a key in eval stats |
-| `CONFIG_TRAIN_SAVE_MERGED_ADAPTER` | bool | `n` | At end of training, merge LoRA adapter into base model and save a full-weight checkpoint |
+| `CONFIG_TRAIN_SAVE_LATEST` | bool | `y` | Update `latest` symlink after every periodic checkpoint save (see §12d-iii for save policies) |
+| `CONFIG_TRAIN_SAVE_BEST_BY` | string | `"eval_reward_mean"` | Metric to track for best-model saving. Must match a key in eval stats. Requires a non-empty validation split; if validation is empty, best-checkpoint selection is disabled and only `latest` checkpoints are saved |
+| `CONFIG_TRAIN_SAVE_MERGED_ADAPTER` | bool | `n` | At end of training, merge LoRA adapter into base model and save to `checkpoints/merged/`. Contains inference-ready weights only (no optimizer/RNG state); not usable for training resume (see §12d-iii) |
 | `CONFIG_TRAIN_SAVE_ADAPTER_ONLY` | bool | `y` | Save only the LoRA adapter weights (not the full model) in each checkpoint |
 
 #### `Kconfig.training_stats`
@@ -532,10 +747,24 @@ The embedding client's `embed_one(text) -> list[float]` function (which replaces
 | Symbol | Type | Default | Description |
 |--------|------|---------|-------------|
 | `CONFIG_TRAIN_STATS_ENABLE` | bool | `y` | Master switch for training statistics collection |
-| `CONFIG_TRAIN_STATS_FILE` | string | `"output/train/train_stats_summary.json"` | End-of-run summary JSON path |
-| `CONFIG_TRAIN_STATS_PER_STEP_JSONL` | string | `"output/train/train_steps.jsonl"` | Per-step metrics (one JSON line per optimizer step) |
-| `CONFIG_TRAIN_STATS_PER_EVAL_JSONL` | string | `"output/train/train_evals.jsonl"` | Per-evaluation metrics (one JSON line per eval round) |
-| `CONFIG_TRAIN_CURVES_DIR` | string | `"output/train/curves"` | Root directory for TeX learning curve artifacts |
+| `CONFIG_TRAIN_STATS_FILE` | string | `""` | End-of-run summary JSON path. If empty (default), derived as `<CONFIG_TRAIN_OUTPUT_DIR>/train_stats_summary.json` |
+| `CONFIG_TRAIN_STATS_PER_STEP_JSONL` | string | `""` | Per-step metrics. If empty (default), derived as `<CONFIG_TRAIN_OUTPUT_DIR>/train_steps.jsonl` |
+| `CONFIG_TRAIN_STATS_PER_EVAL_JSONL` | string | `""` | Per-evaluation metrics. If empty (default), derived as `<CONFIG_TRAIN_OUTPUT_DIR>/train_evals.jsonl` |
+| `CONFIG_TRAIN_CURVES_DIR` | string | `""` | Root directory for TeX learning curve artifacts. If empty (default), derived as `<CONFIG_TRAIN_OUTPUT_DIR>/curves` |
+
+**Training output path derivation rule:** When `CONFIG_TRAIN_STATS_FILE`, `CONFIG_TRAIN_STATS_PER_STEP_JSONL`, `CONFIG_TRAIN_STATS_PER_EVAL_JSONL`, or `CONFIG_TRAIN_CURVES_DIR` are empty (the default), `config.py` derives them from `CONFIG_TRAIN_OUTPUT_DIR`:
+
+| Derived path | Value |
+|-------------|-------|
+| `TRAIN_STATS_FILE` | `<TRAIN_OUTPUT_DIR>/train_stats_summary.json` |
+| `TRAIN_STATS_PER_STEP_JSONL` | `<TRAIN_OUTPUT_DIR>/train_steps.jsonl` |
+| `TRAIN_STATS_PER_EVAL_JSONL` | `<TRAIN_OUTPUT_DIR>/train_evals.jsonl` |
+| `TRAIN_CURVES_DIR` | `<TRAIN_OUTPUT_DIR>/curves` |
+| Checkpoints | `<TRAIN_OUTPUT_DIR>/checkpoints/` (always derived, not a separate Kconfig symbol) |
+| `resolved_seeds.json` | `<TRAIN_OUTPUT_DIR>/resolved_seeds.json` (always derived) |
+| `reward_config.json` | `<TRAIN_OUTPUT_DIR>/reward_config.json` (always derived) |
+
+If any of these symbols is explicitly set to a non-empty string, that value is used instead (after persistent path resolution). This means changing only `CONFIG_TRAIN_OUTPUT_DIR` in a defconfig is sufficient to redirect all training outputs to a new directory.
 | `CONFIG_TRAIN_CURVES_TEX_ENABLE` | bool | `y` | Maintain TeX/PGFPlots source files for learning curves |
 | `CONFIG_TRAIN_CURVES_COMPILE_ENABLE` | bool | `y` | Automatically compile TeX to PDF during training |
 | `CONFIG_TRAIN_CURVES_UPDATE_EVERY_STEPS` | int | `25` | Update TSV data files and regenerate TeX every N optimizer steps |
@@ -549,9 +778,58 @@ The embedding client's `embed_one(text) -> list[float]` function (which replaces
 
 **TeX maintenance cadence:** During training, `curves.py` updates `.tsv` data files and regenerates `.tex` sources every `CONFIG_TRAIN_CURVES_UPDATE_EVERY_STEPS` optimizer steps. `tex_compile.py` compiles the `.tex` files to PDF every `CONFIG_TRAIN_CURVES_COMPILE_EVERY_STEPS` steps. A final compilation always happens at end of training (`CONFIG_TRAIN_CURVES_COMPILE_AT_END`). Compilation failures are logged at WARNING level and recorded in `compile_status.json` but **never** crash the training run. This means learning curves are inspectable PDFs that update incrementally during long training runs.
 
+**`tex_compile.py` storage behavior:** All intermediate compile artifacts (`.aux`, `.log`, `.fls`, temporary working directories) are created under `CONFIG_EPHEMERAL_TMPDIR` (Container disk, default `/tmp`) and cleaned up after each compilation attempt. Final PDFs are written to `CONFIG_TRAIN_CURVES_DIR/pdf/` (persistent Volume disk). `compile_status.json` is written to `CONFIG_TRAIN_CURVES_DIR/manifests/` (persistent Volume disk). Final artifacts must never exist only in `/tmp`; the PDF is moved to the persistent directory before the temp dir is cleaned up.
+
+#### `Kconfig.test_trained`
+
+Configuration for post-training test evaluation — evaluating a trained model checkpoint on the configured test split.
+
+**Checkpoint selection:**
+
+| Symbol | Type | Default | Description |
+|--------|------|---------|-------------|
+| `CONFIG_TEST_TRAINED_CHECKPOINT_SOURCE` | choice | `TEST_TRAINED_CHECKPOINT_BEST` | Which trained checkpoint to evaluate on the test split |
+| `CONFIG_TEST_TRAINED_CHECKPOINT_PATH` | string | `""` | Explicit checkpoint path (used when source = `TEST_TRAINED_CHECKPOINT_EXPLICIT_PATH`) |
+
+**`CONFIG_TEST_TRAINED_CHECKPOINT_SOURCE` choices:**
+
+| Choice | Resolved path | Description |
+|--------|---------------|-------------|
+| `TEST_TRAINED_CHECKPOINT_BEST` (default) | `<TRAIN_OUTPUT_DIR>/checkpoints/best/` | Evaluate the best checkpoint (selected by `CONFIG_TRAIN_SAVE_BEST_BY` during training) |
+| `TEST_TRAINED_CHECKPOINT_LATEST` | `<TRAIN_OUTPUT_DIR>/checkpoints/latest/` | Evaluate the most recently saved checkpoint |
+| `TEST_TRAINED_CHECKPOINT_MERGED` | `<TRAIN_OUTPUT_DIR>/checkpoints/merged/` | Evaluate the merged full-weight checkpoint (requires `CONFIG_TRAIN_SAVE_MERGED_ADAPTER=y` during training) |
+| `TEST_TRAINED_CHECKPOINT_EXPLICIT_PATH` | `CONFIG_TEST_TRAINED_CHECKPOINT_PATH` | Evaluate a checkpoint at an explicit user-provided path |
+
+**Output paths:**
+
+| Symbol | Type | Default | Description |
+|--------|------|---------|-------------|
+| `CONFIG_TEST_TRAINED_OUTPUT_DIR` | string | `""` | Root for test-eval outputs. If empty (default), derived as `<CONFIG_TRAIN_OUTPUT_DIR>/test_<source>/` where `<source>` is `best`, `latest`, `merged`, or `explicit` |
+| `CONFIG_TEST_TRAINED_RESULT_FILE` | string | `""` | Result JSONL path. If empty (default), derived as `<CONFIG_TEST_TRAINED_OUTPUT_DIR>/results.jsonl` |
+| `CONFIG_TEST_TRAINED_DAG_STATS_FILE` | string | `""` | DAG stats JSON path. If empty (default), derived as `<CONFIG_TEST_TRAINED_OUTPUT_DIR>/dag_stats.json` |
+
+**Output path derivation rule:** When `CONFIG_TEST_TRAINED_OUTPUT_DIR` is empty, `config.py` derives it from `CONFIG_TRAIN_OUTPUT_DIR` and the checkpoint source:
+
+| Source | Derived `TEST_TRAINED_OUTPUT_DIR` |
+|--------|----------------------------------|
+| `best` | `<TRAIN_OUTPUT_DIR>/test_best/` |
+| `latest` | `<TRAIN_OUTPUT_DIR>/test_latest/` |
+| `merged` | `<TRAIN_OUTPUT_DIR>/test_merged/` |
+| `explicit_path` | `<TRAIN_OUTPUT_DIR>/test_explicit/` |
+
+When `CONFIG_TEST_TRAINED_RESULT_FILE` or `CONFIG_TEST_TRAINED_DAG_STATS_FILE` are empty, they are derived from `CONFIG_TEST_TRAINED_OUTPUT_DIR` as shown above. If any symbol is explicitly set to a non-empty string, that value is used instead (after persistent path resolution). A `test_eval_summary.json` is always written to `CONFIG_TEST_TRAINED_OUTPUT_DIR` (derived, not a separate Kconfig symbol).
+
+**Checkpoint validation at startup:** When `test_main.py` is invoked, `checkpoint_resolver.py` validates that the selected checkpoint directory exists and contains the expected files (adapter weights or full model weights). If the checkpoint is missing, a `FileNotFoundError` is raised with an actionable message:
+- Best missing: `"Best checkpoint not found at <path>. Has training completed with at least one evaluation step?"`
+- Latest missing: `"Latest checkpoint not found at <path>. Has training saved at least one checkpoint?"`
+- Merged missing: `"Merged checkpoint not found at <path>. Did you set CONFIG_TRAIN_SAVE_MERGED_ADAPTER=y during training?"`
+- Explicit path missing: `"Checkpoint path does not exist: <path>"`
+
 ### 4. Module Code — How Each Component Works
 
 #### 4a. Shipped DAG Prompt Template (`prompt/get_dag.md`)
+
+The module **vendors** its own copy of the DAG-generation prompt template at `prompt/get_dag.md` (copied from the upstream `AixelAsk/prompt/get_dag.md` with the question-type section removed). Few-shot examples are similarly vendored under `prompt/fewshot/`. This makes the module self-contained and allows it to diverge from upstream without modifying upstream files.
 
 The module ships the following DAG-generation prompt template **verbatim** as `prompt/get_dag.md`. This is the **standard** prompt, used when `CONFIG_DAG_PROMPT_VARIANT=DAG_PROMPT_STANDARD` (or when `CONFIG_PLAN_PROMPT` explicitly points to this file). There is no question-type classifier, no question-type field, and no per-type prompt routing. The LLM chooses the DAG structure (parallel, sequential, or hybrid) by itself.
 
@@ -581,34 +859,34 @@ Based on the question, choose the DAG structure yourself. You may use:
 
 ### Output Format (strictly follow):
 ```
-[ {"Node ID": "Node ID", "Sub-Level-Question": "Sub-Level-Question", "Action": "retrieval" or "reasoning", "Top k": "Number or 'all',"Next": "Node ID"}, ... ]
+[ {"NodeID": 1, "Sub-Level-Question": "...", "Action": "Retrieval" or "Reasoning", "Top k": "Number or 'all'", "Next": [2, 3]}, ... ]
 ```
 
 ### Example
 
-{fewshot}
+{{ fewshot }}
 
 ### Now, generate a structured DAG for the following question:
 
 Question:
 ```
-{question}
+{{ question }}
 ```
 
 Sampled Table:
 ```
-{table}
+{{ table }}
 ```
 
 Output:
 ````
 
-**Placeholders:**
-- `{fewshot}` — replaced at runtime with the concatenation of **all** standard few-shot examples (parallel, sequential, hybrid). See fewshot policy below.
-- `{question}` — the user's question.
-- `{table}` — a sampled markdown table.
+**Placeholders (Jinja2):**
+- `{{ fewshot }}` — the concatenation of **all** standard few-shot examples (parallel, sequential, hybrid). See fewshot policy below.
+- `{{ question }}` — the user's question.
+- `{{ table }}` — a sampled markdown table.
 
-There is **no** `{question_type}` placeholder. The template does not mention or accept a question type. The LLM reads the question and decides the structure.
+There is **no** `{{ question_type }}` placeholder. The template does not mention or accept a question type. The LLM reads the question and decides the structure.
 
 **Enforced constraints (by `validate_dag`):**
 1. Each DAG must end with at least one reasoning node (terminal nodes with empty `Next` must have `Action == "Reasoning"`).
@@ -617,22 +895,22 @@ There is **no** `{question_type}` placeholder. The template does not mention or 
 
 **Fewshot policy:**
 
-The `{fewshot}` block is populated by concatenating the files selected by `CONFIG_FEWSHOT_VARIANT` (see `Kconfig.retrieval`). The two variants are:
+The `{{ fewshot }}` block is populated by concatenating the files selected by `CONFIG_FEWSHOT_VARIANT` (see `Kconfig.retrieval`). The two variants are:
 
 **`FEWSHOT_STANDARD_ALL3` (default):** 3 files, fixed order:
 
-1. `/workspace/AixelAsk/AixelAsk/prompt/fewshot/fewshot_parallel.txt` (2 examples)
-2. `/workspace/AixelAsk/AixelAsk/prompt/fewshot/fewshot_sequential.txt` (2 examples)
-3. `/workspace/AixelAsk/AixelAsk/prompt/fewshot/fewshot_hybrid.txt` (2 examples)
+1. `prompt/fewshot/fewshot_parallel.txt` (2 examples)
+2. `prompt/fewshot/fewshot_sequential.txt` (2 examples)
+3. `prompt/fewshot/fewshot_hybrid.txt` (2 examples)
 
 Total: **6 few-shot examples** (2 parallel + 2 sequential + 2 hybrid).
 
 **`FEWSHOT_PARALLEL_HYBRID_EXTENDED`:** 4 files, fixed order:
 
-1. `/workspace/AixelAsk/AixelAsk/prompt/fewshot/fewshot_parallel.txt` (2 examples)
-2. `/workspace/AixelAsk/AixelAsk/prompt/fewshot/fewshot_hybrid.txt` (2 examples)
-3. `/workspace/AixelAsk/AixelAsk/prompt/fewshot/fewshot_parallel_extended.txt` (extended parallel examples)
-4. `/workspace/AixelAsk/AixelAsk/prompt/fewshot/fewshot_hybrid_extended.txt` (extended hybrid examples)
+1. `prompt/fewshot/fewshot_parallel.txt` (2 examples)
+2. `prompt/fewshot/fewshot_hybrid.txt` (2 examples)
+3. `prompt/fewshot/fewshot_parallel_extended.txt` (extended parallel examples)
+4. `prompt/fewshot/fewshot_hybrid_extended.txt` (extended hybrid examples)
 
 No sequential examples are included. This variant tests whether removing sequential few-shot examples (and adding extended parallel/hybrid examples) affects the LLM's DAG structure choices.
 
@@ -642,7 +920,7 @@ Both variants are unconditional per question — the same examples are used for 
 
 **Note on repo vs. paper:** The paper mentions "15 few-shot examples (5 per reasoning type)" but the public repo provides only 6 standard table-QA examples (2 per type) plus the extended files. The `fewshot_tabfact.txt` file (1 example for fact-verification) also exists in the upstream repo but is **not** used by this module since TabFact+ is excluded. Neither variant includes TabFact examples.
 
-This is implemented in the patched `get_dag` function (see `patch_dag.py` below): the wrapper resolves the file list from `CONFIG_FEWSHOT_VARIANT`, loads and concatenates them once at init time, stores the `fewshot_variant` string for metadata, then formats the template with `{fewshot}`, `{question}`, and `{table}` for each call.
+This is implemented in the patched `get_dag` function (see `patch_dag.py` below): the wrapper resolves the file list from `CONFIG_FEWSHOT_VARIANT`, loads and concatenates them once at init time, stores the `fewshot_variant` string for metadata, then renders the template via `jinja2.Template(template_text).render(fewshot=..., question=..., table=...)` for each call.
 
 #### 4a-baseline. Shipped Baseline DAG Prompt Template (`prompt/get_dag_min_depth.md`)
 
@@ -661,7 +939,7 @@ Provide a minimal-depth DAG that maximizes opportunities for parallel execution 
 ### Important Rules:
 ````
 
-That single added line — `Provide a minimal-depth DAG that maximizes opportunities for parallel execution whenever possible.` — is the **only** difference between the standard and baseline prompts. No other text is changed, added, or removed. Placeholders `{fewshot}`, `{question}`, `{table}` are identical. Enforced constraints (`validate_dag`) are identical. Fewshot policy (all examples concatenated) is identical.
+That single added line — `Provide a minimal-depth DAG that maximizes opportunities for parallel execution whenever possible.` — is the **only** difference between the standard and baseline prompts. No other text is changed, added, or removed. Placeholders `{{ fewshot }}`, `{{ question }}`, `{{ table }}` are identical. Enforced constraints (`validate_dag`) are identical. Fewshot policy (all examples concatenated) is identical.
 
 **Purpose:** This baseline encourages the LLM to produce wider, shallower DAGs (more parallelism). Comparing standard vs. baseline runs on the same dataset reveals whether explicit parallelism instructions affect DAG depth, answer quality, or execution efficiency — which is useful for studying the trade-off described in the paper's "Execution Optimizations Opportunities" section.
 
@@ -669,7 +947,70 @@ That single added line — `Provide a minimal-depth DAG that maximizes opportuni
 
 Reads the Kconfig-generated `.config` file (lines like `CONFIG_SGLANG_PORT=30000`) into a Python dataclass. Strips quotes from strings, casts ints, handles `y`/`n` as bools. All other modules import from here.
 
+**Training output derivation:** If `CONFIG_TRAIN_STATS_FILE`, `CONFIG_TRAIN_STATS_PER_STEP_JSONL`, `CONFIG_TRAIN_STATS_PER_EVAL_JSONL`, or `CONFIG_TRAIN_CURVES_DIR` are empty (the default), `config.py` derives them from `CONFIG_TRAIN_OUTPUT_DIR` as documented in `Kconfig.training_stats`. This is done before persistent path resolution.
+
+**Derived constant — `PROJECT_DIR`:** Before any path resolution, `config.py` computes `PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))` — the `nlp_project/` directory on disk. This is immutable and independent of any Kconfig symbol. It is stored on the config dataclass as `config.PROJECT_DIR`.
+
+**Persistent path resolution:** After derivation, `config.py` resolves every relative persistent path to an absolute path by prepending `CONFIG_PERSISTENT_ROOT` (default `/workspace/AixelAsk/nlp_project`). The complete list of symbols resolved this way:
+
+- `CONFIG_MODEL_CACHE_DIR` (persistent HF model cache on Volume disk)
+- `CONFIG_RESULT_FILE`
+- `CONFIG_EMBEDDING_CACHE` (persistent embedding cache on Volume disk)
+- `CONFIG_LOG_FILE`
+- `CONFIG_DAG_STATS_FILE`
+- `CONFIG_LLM_CALLS_SIDEFILE`
+- `CONFIG_TRAIN_OUTPUT_DIR`
+- `CONFIG_TRAIN_STATS_FILE` (after derivation from `CONFIG_TRAIN_OUTPUT_DIR` if empty)
+- `CONFIG_TRAIN_STATS_PER_STEP_JSONL` (after derivation)
+- `CONFIG_TRAIN_STATS_PER_EVAL_JSONL` (after derivation)
+- `CONFIG_TRAIN_CURVES_DIR` (after derivation)
+- `CONFIG_TRAIN_CHECKPOINT_PATH`
+- `CONFIG_OVERFIT_POC_INDICES_FILE` (if relative)
+- `CONFIG_TEST_TRAINED_OUTPUT_DIR` (after derivation from `CONFIG_TRAIN_OUTPUT_DIR` + checkpoint source)
+- `CONFIG_TEST_TRAINED_RESULT_FILE` (after derivation)
+- `CONFIG_TEST_TRAINED_DAG_STATS_FILE` (after derivation)
+- `CONFIG_TEST_TRAINED_CHECKPOINT_PATH`
+
+**Prompt path resolution (against `PROJECT_DIR`):** Prompt paths (`CONFIG_FINAL_REASONING_PROMPT`, `CONFIG_NOPLAN_REASONING_PROMPT`, `CONFIG_ROW_PROMPT`, `CONFIG_COL_PROMPT`, `CONFIG_SCHEMA_LINKING_PROMPT`, `CONFIG_PLAN_PROMPT`, and the few-shot file list from `CONFIG_FEWSHOT_VARIANT`) are resolved against `PROJECT_DIR`, not `CONFIG_PERSISTENT_ROOT`. This ensures vendored prompt templates remain anchored to the on-disk module directory regardless of where the user redirects output artifacts.
+
+Dataset paths (`CONFIG_INFERENCE_DATASET_PATH`, `CONFIG_TRAIN_DATASET_PATH`, `CONFIG_TRAIN_DEV_DATASET_PATH`) are resolved against the AixelAsk repo root (`/workspace/AixelAsk/AixelAsk`) if relative, since datasets ship with the upstream repo. Absolute paths are used as-is. Any locally staged dataset copies must go under `/workspace`, never Container disk. When `CONFIG_SPLIT_MODE=SPLIT_MODE_EXPLICIT_INDICES`, canonical dataset paths are resolved by `dataset_registry.py` against the same repo root; the above symbols are not used for data loading in that mode.
+
+After path resolution, `config.py` also:
+- Sets `HF_HOME` and `TRANSFORMERS_CACHE` environment variables to the resolved `CONFIG_MODEL_CACHE_DIR` before any Hugging Face library is imported. All HF libraries then use `$HF_HOME/hub/` as the model hub cache automatically. Code must not pass `cache_dir` explicitly; the env var is the single source of truth (see `Kconfig.model`).
+- Sets `TMPDIR` to `CONFIG_EPHEMERAL_TMPDIR` (default `/tmp`) for any library that respects it.
+- Creates parent directories (`os.makedirs(..., exist_ok=True)`) for all output paths.
+
+This ensures all valuable artifacts land on the Runpod Volume disk (see §17) and ephemeral scratch uses Container disk.
+
 **TabFact+ guardrail:** After parsing, `config.py` validates the resolved dataset path. If the path contains `"tabfact"` (case-insensitive substring match), it raises `ValueError("TabFact+ is not supported in nlp_project; please choose WikiTQ-4k/WikiTQ+/Scalability or provide a non-TabFact custom dataset.")`. This catches both the (now-removed) Kconfig choice and any custom path that points to a TabFact+ file. The check runs at startup so the error is immediate and actionable.
+
+**Split mode parsing and validation:** `config.py` parses `CONFIG_SPLIT_MODE` into one of `"seeded_ratio"`, `"explicit_indices"`, or `"overfit_poc"`. When the mode is `explicit_indices`, it additionally:
+
+1. **Parses each of the 9 index-list strings** (`CONFIG_SPLIT_TRAIN_WIKITQ_4K_INDICES`, etc.) into structured `list[int]`:
+   - Splits on commas.
+   - Strips whitespace from each token.
+   - Ignores empty tokens (from trailing commas or `"1,,3"`).
+   - Converts each non-empty token to `int`. If a token cannot be parsed as an integer, raises `ValueError(f"Non-integer token '{token}' in {symbol_name}")`.
+   - Deduplicates (preserving first occurrence).
+   - Sorts ascending.
+   - Stores as `list[int]` on the config dataclass.
+
+2. **Validates bounds** by loading the canonical JSONL files via `dataset_registry.py` and checking that every index is in `[0, line_count)`. Out-of-range indices raise `ValueError(f"Index {idx} out of range for {dataset_key} (max {line_count - 1})")`.
+
+3. **Validates cross-split disjointness:** Collects all `(dataset, index)` pairs across the three splits (train, validation, test). If any pair appears in more than one split, raises `ValueError` listing all offending `(dataset, index)` duplicates.
+
+4. **Validates non-empty split constraints:**
+   - If `CONFIG_ENABLE_TRAINING=n` (inference/baselines) and the test split is empty: raises `ValueError("Explicit test split is empty; inference/baseline runs require at least one test example.")`.
+   - If `CONFIG_ENABLE_TRAINING=y` and the train split is empty: raises `ValueError("Explicit train split is empty; training requires at least one training example.")`.
+
+5. **Stores structured split data** on the config dataclass as:
+   - `split_train: list[SplitEntry]` where `SplitEntry = (source_dataset: str, source_index: int, example: dict)`.
+   - `split_valid: list[SplitEntry]`
+   - `split_test: list[SplitEntry]`
+
+   These are populated lazily on first access (or eagerly at startup if validation requires loading). The `SplitEntry` structure ensures `source_dataset` and `source_index` are always available downstream.
+
+When the mode is `seeded_ratio`, the 9 index-list symbols are ignored (but still parsed for syntax if non-empty, to catch typos in configs that might later switch modes). When the mode is `overfit_poc`, split construction is delegated to `tiny_overfit_poc.py` as before.
 
 **LLM sampling parameters** require explicit float/int parsing:
 
@@ -703,6 +1044,8 @@ These are stored in the config dataclass alongside existing fields and accessed 
 2. Send `SIGTERM`, wait 10s, then `SIGKILL` if still alive.
 3. Remove `.sglang.pid`.
 4. Registered as an `atexit` handler so the server is always cleaned up.
+
+**Storage:** The `.sglang.pid` file and all user-facing logs (`CONFIG_LOG_FILE`) are written to persistent Volume disk paths resolved under `CONFIG_PERSISTENT_ROOT`. SGLang's internal runtime scratch (CUDA memory maps, temp files) uses Container disk implicitly and is safe to lose on Pod restart. The server process does not store any state that must survive restarts beyond the PID file and logs.
 
 #### `src/sglang_client.py` — SGLang Client (OpenAI-compatible)
 
@@ -766,8 +1109,8 @@ model = SentenceTransformer(
 ```
 
 Exposes:
-- `embed_one(text) -> list[float]` — matches the `request_gpt_embedding` signature (single string in, single vector out). Internally applies the prefix according to `CONFIG_NOMIC_PREFIX_MODE` before encoding.
-- `embed_batch(texts, batch_size) -> list[list[float]]` — batched version for `save_embeddings.py` use. Same prefix logic.
+- `embed_one(text) -> list[float]` — matches the `request_gpt_embedding` signature (single string in, single vector out). Internally applies the prefix according to `CONFIG_NOMIC_PREFIX_MODE` before encoding. Acquires the global `CONFIG_GLOBAL_EMBEDDING_CONCURRENCY` semaphore before encoding (the semaphore is passed to the client at init time from `main.py`), ensuring that all embedding calls — including those from the patched `request_gpt_embedding` path used by `save_embeddings.py` — respect the same global concurrency bound.
+- `embed_batch(texts, batch_size) -> list[list[float]]` — batched version for `dag_executor` retrieval batching and `save_embeddings.py` use. Same prefix logic. Also acquires the global embedding semaphore before encoding.
 
 **Prefix handling (`CONFIG_NOMIC_PREFIX_MODE`):**
 
@@ -805,7 +1148,7 @@ Instead of patching `request_gpt_chat` directly to `sglang_client.chat`, a recor
 ```python
 def recording_chat(prompt):
     result = sglang_client.chat_with_metadata(prompt)  # sampling params from config
-    call_recorder.record(
+    call_id = call_recorder.record(       # returns a call_id for post-hoc annotation
         stage=ctx_stage.get(),            # from item_context (contextvars)
         prompt=prompt,                    # exact text sent
         response_text=result.text,
@@ -821,19 +1164,25 @@ def recording_chat(prompt):
         presence_penalty=config.LLM_PRESENCE_PENALTY,
         seed=config.LLM_SEED if config.LLM_SEED >= 0 else None,
     )
-    return result.text   # return only text to match request_gpt_chat contract
+    ctx_last_call_id.set(call_id)         # store call_id in contextvars for post-hoc annotation by patch_dag
+    return result.text                    # always return str — matches upstream request_gpt_chat contract
 
 rg.request_gpt_chat = recording_chat
+rg.request_gpt_chat_1 = recording_chat
 ```
+
+**Post-hoc annotation via `call_recorder.update()`:** The `recording_chat` wrapper stores the `call_id` in `ctx_last_call_id` (a `ContextVar` from `item_context.py`) so that `patch_dag.py` can retrieve it after the call returns. When `validate_dag` fails, `patch_dag` reads `call_id = ctx_last_call_id.get()` and calls `call_recorder.update(call_id, error="DAG validation failed: <message>", error_category="<normalized_category>")` to set the `error` and `error_category` fields on the exact call record that produced the invalid response. This is the sole mechanism for post-hoc annotation — the recorder never modifies call records except via explicit `update()` calls. The `recording_chat` wrapper always returns a plain `str`, preserving the upstream `request_gpt_chat` return-type contract. No upstream code is modified.
 
 The `call_recorder` is a thread-safe object (passed in from `main.py`) that accumulates `llm_calls` entries per item. It uses `contextvars` (from `item_context.py`) — not `threading.local()` — to associate each call with the correct item, stage, and DAG node, even when multiple nodes within a single item execute concurrently in different threads.
 
 **Stage identification via `contextvars`:** Each LLM call-site in the upstream code calls `request_gpt_chat(prompt)` with no stage label. To identify which stage a call belongs to, `patch_dag.py`, `dag_executor.py`, and `pipeline.py` set `contextvars` before invoking upstream functions:
 - `ctx_stage = "dag_generation"` — set before calling `get_dag(...)`.
 - `ctx_stage = "retrieval"`, `ctx_node_id = N` — set by `dag_executor` before each retrieval node.
-- `ctx_stage = "reasoning"`, `ctx_node_id = N` — set by `dag_executor` before each reasoning node.
-- `ctx_stage = "noplan_reasoning"` — set before calling `generate_noplan_answer(...)`.
-- Other stages (schema linking, row/col descriptions) follow the same pattern.
+- `ctx_stage = "reasoning"`, `ctx_node_id = N` — set by `dag_executor` before each intermediate reasoning node within the DAG.
+- `ctx_stage = "final_reasoning"` — set before calling `generate_final_answer_DAG(...)` (the terminal answer-generation call after all DAG nodes are executed).
+- `ctx_stage = "noplan_reasoning"` — set before calling `generate_noplan_answer(...)` (fallback when no valid DAG was produced).
+- `ctx_stage = "schema_linking"` — set before schema-linking calls.
+- Other stages (row/col descriptions) follow the same pattern.
 
 The recording wrapper reads `ctx_item_index`, `ctx_stage`, `ctx_node_id`, and `ctx_attempt` from `item_context` and includes them in the call record. If any context var is not set, it defaults to `None` / `"unknown"`. The `timestamp` and `node_id` fields ensure stable ordering of `llm_calls` even when calls from different nodes complete out-of-order.
 
@@ -841,7 +1190,7 @@ The recording wrapper reads `ctx_item_index`, `ctx_stage`, `ctx_node_id`, and `c
 
 **Truncation:** If `CONFIG_LOG_LLM_CALLS_MAX_CHARS > 0`, the `prompt` and `response_text` fields are truncated to that length with the suffix `"...<truncated>"` before storage.
 
-**When `CONFIG_LOG_LLM_PROMPTS=y`, the module MUST store the exact prompt(s) sent to the LLM for each stage in the output results JSONL.** This is the final prompt after all template substitutions, including the full `{fewshot}` block and the sampled table text.
+**When `CONFIG_LOG_LLM_PROMPTS=y`, the module MUST store the exact prompt(s) sent to the LLM for each stage in the output results JSONL.** This is the final prompt after all Jinja2 template substitutions, including the full `{{ fewshot }}` block and the sampled table text.
 
 This ensures that when `generate_dag.py` calls `request_gpt_chat(dag_prompt)`, it transparently goes to the local SGLang server (and optionally records the call). When `save_embeddings.py` calls `request_gpt_embedding(desc)`, it goes to the local nomic model (with prefix handling governed by `CONFIG_NOMIC_PREFIX_MODE`). **No existing upstream code is modified.**
 
@@ -853,6 +1202,8 @@ Each line in the output JSONL is a JSON object. All existing AixelAsk fields (`i
 
 ```json
 {
+  "source_dataset": "wikitq_4k",
+  "source_index": 42,
   "used_dag": true,
   "dag_regen_attempts": 2,
   "dag_prompt_variant": "standard",
@@ -865,15 +1216,37 @@ Each line in the output JSONL is a JSON object. All existing AixelAsk fields (`i
 }
 ```
 
+- `source_dataset` (`string`): Dataset key identifying which canonical dataset this example came from: `"wikitq_4k"`, `"wikitq_plus"`, or `"scalability"`. When `SPLIT_MODE_SEEDED_RATIO` is active, derived from the `CONFIG_DATASET` choice. When `SPLIT_MODE_EXPLICIT_INDICES` is active, set directly from the per-dataset registry.
+- `source_index` (`int`): Zero-based index of this example in the canonical JSONL for its `source_dataset`. Enables exact identification of which source line produced each result, supporting reproducibility and analysis.
 - `used_dag` (`bool`): `true` if a valid DAG was generated and used for retrieval/reasoning; `false` if the item fell back to no-plan reasoning.
 - `dag_regen_attempts` (`int`): Number of `validate_dag` attempts before a valid DAG was obtained (1 = first try). If `used_dag` is `false`, this is the total attempts before giving up (equal to `CONFIG_DAG_MAX_RETRIES`).
 - `dag_prompt_variant` (`string`): `"standard"` or `"min_depth_baseline"` — records which DAG prompt variant was active for this item. Enables filtering/grouping when comparing runs.
-- `fewshot_variant` (`string`): `"all3"` or `"parallel_hybrid_extended"` — records which few-shot set populated `{fewshot}` for this item.
+- `fewshot_variant` (`string`): `"all3"` or `"parallel_hybrid_extended"` — records which few-shot set populated `{{ fewshot }}` for this item.
 - `is_correct_numeric` (`int`): `1` if the item's final answer was correct, `0` otherwise. Derived from the upstream `is_correct` field. Present for every item regardless of DAG success.
 - `dag_depth` (`int | null`): Longest-path node count in the final DAG. `null` if no valid DAG was produced (item fell back to no-plan).
 - `dag_validity_final` (`int`): `1` if a valid DAG was obtained and used; `0` if the item fell back to no-plan reasoning.
 - `invalid_dag_attempts` (`int`): Number of `validate_dag` attempts that failed for this item. `0` means the first attempt succeeded. Equal to `dag_regen_attempts - 1` if a valid DAG was eventually obtained, or `dag_regen_attempts` if the item fell back.
 - `validity_error_types_seen` (`list[string]`): Distinct normalized error categories encountered across all failed attempts for this item. Empty list `[]` if all attempts succeeded on first try. Categories are from the stable set defined in `patch_dag.py` (e.g. `"json_parse_error"`, `"missing_keys"`, `"cycle_detected"`, etc.).
+
+**Checkpoint provenance fields (present when the run is a post-training test evaluation via `test_main.py`):**
+
+```json
+{
+  "checkpoint_source": "best",
+  "checkpoint_path": "/workspace/AixelAsk/nlp_project/output/train_grpo/checkpoints/best/",
+  "checkpoint_step": 375,
+  "checkpoint_metric_name": "eval_reward_mean",
+  "checkpoint_metric_value": 0.68
+}
+```
+
+- `checkpoint_source` (`string`): Which checkpoint was evaluated: `"best"`, `"latest"`, `"merged"`, or `"explicit_path"`. Present only in results written by `test_main.py`; absent in standard `make run` results.
+- `checkpoint_path` (`string`): Resolved absolute path of the checkpoint directory used for this evaluation.
+- `checkpoint_step` (`int | null`): Training step at which this checkpoint was saved. Read from `checkpoint_metadata.json` if available; `null` otherwise.
+- `checkpoint_metric_name` (`string | null`): For `best` checkpoints, the metric name used for selection (e.g. `"eval_reward_mean"`). `null` for other sources.
+- `checkpoint_metric_value` (`float | null`): For `best` checkpoints, the metric value that selected this checkpoint. `null` for other sources.
+
+These fields enable post-hoc analysis to identify exactly which trained model state produced each result, and to compare results across checkpoint sources (e.g. best vs. latest) or training runs.
 
 **LLM call log fields (present when `CONFIG_LOG_LLM_CALLS_PER_ITEM=y` and at least one of `CONFIG_LOG_LLM_PROMPTS` / `CONFIG_LOG_LLM_RESPONSES` is `y`):**
 
@@ -931,7 +1304,7 @@ Each line in the output JSONL is a JSON object. All existing AixelAsk fields (`i
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `stage` | string | Identifies the pipeline stage: `"dag_generation"`, `"final_reasoning"`, `"noplan_reasoning"`, `"schema_linking"`, or `"unknown"` if not set. |
+| `stage` | string | Identifies the pipeline stage: `"dag_generation"`, `"retrieval"`, `"reasoning"` (intermediate DAG reasoning node), `"final_reasoning"` (terminal answer-generation call), `"noplan_reasoning"`, `"schema_linking"`, or `"unknown"` if not set. |
 | `model` | string | Resolved model name from the API response. |
 | `temperature` | float | Temperature used for this call. |
 | `max_output_tokens` | int | `max_tokens` parameter sent to the API. |
@@ -940,13 +1313,14 @@ Each line in the output JSONL is a JSON object. All existing AixelAsk fields (`i
 | `frequency_penalty` | float | `frequency_penalty` value sent. |
 | `presence_penalty` | float | `presence_penalty` value sent. |
 | `seed` | int \| null | `seed` value sent, or `null` if omitted (i.e., `CONFIG_LLM_SEED=-1`). |
-| `prompt` | string \| null | The **exact** text sent to the LLM, after all template substitutions (including the full `{fewshot}` block and sampled table). Present only when `CONFIG_LOG_LLM_PROMPTS=y`; `null` otherwise. Subject to `CONFIG_LOG_LLM_CALLS_MAX_CHARS` truncation. |
+| `prompt` | string \| null | The **exact** text sent to the LLM, after all Jinja2 template substitutions (including the full `{{ fewshot }}` block and sampled table). Present only when `CONFIG_LOG_LLM_PROMPTS=y`; `null` otherwise. Subject to `CONFIG_LOG_LLM_CALLS_MAX_CHARS` truncation. |
 | `response_text` | string \| null | Raw text returned by the LLM. Present only when `CONFIG_LOG_LLM_RESPONSES=y`; `null` otherwise. Subject to `CONFIG_LOG_LLM_CALLS_MAX_CHARS` truncation. |
 | `finish_reason` | string \| null | From the API response (`"stop"`, `"length"`, etc.), or `null` if unavailable. |
 | `usage` | object \| null | Token counts from the API response, or `null` if unavailable. |
 | `attempt` | int | Retry attempt index (1-based). For DAG generation, attempt 1 is the first try; attempt 2+ means the previous response failed validation. |
 | `timestamp` | string | ISO 8601 timestamp of when the call was made. |
-| `error` | string \| null | If the call failed or its output was invalid, a description of the error; `null` on success. |
+| `error` | string \| null | If the call failed (API error) or its output was invalid (DAG validation failure), a description of the error; `null` on success. For `dag_generation` calls where the LLM response was received but `validate_dag` failed, this contains the validation error message (e.g. `"DAG validation failed: missing NodeID field"`). |
+| `error_category` | string \| null | Normalized error category if `error` is non-null: one of `"api_error"`, `"json_parse_error"`, `"missing_keys"`, `"bad_field_type"`, `"cycle_detected"`, `"terminal_not_reasoning"`, `"invalid_next_ref"`, `"duplicate_node_id"`, `"other"`, or `null` on success. Enables structured analysis of failure modes. |
 
 The recorder in `patch_request_gpt.py` stores the **exact values sent** in each call (read from `config` at call time). If `seed` or `top_k` were omitted from the request (because their config values are `-1` / `0` respectively), the corresponding field is `null` in the log record.
 
@@ -971,13 +1345,32 @@ Provides a `contextvars`-based context object that replaces all thread-local sta
 |----------|------|---------|
 | `ctx_item_index` | `ContextVar[int]` | Current item index |
 | `ctx_item_question` | `ContextVar[str]` | Current item question text |
-| `ctx_stage` | `ContextVar[str]` | Current pipeline stage (`"dag_generation"`, `"retrieval"`, `"reasoning"`, etc.) |
+| `ctx_stage` | `ContextVar[str]` | Current pipeline stage (`"dag_generation"`, `"retrieval"`, `"reasoning"`, `"final_reasoning"`, `"noplan_reasoning"`, `"schema_linking"`) |
 | `ctx_node_id` | `ContextVar[int\|None]` | Current DAG node ID (set during node execution, `None` during DAG generation) |
 | `ctx_attempt` | `ContextVar[int]` | Current retry attempt (1-based) |
+| `ctx_dag_attempt_results` | `ContextVar[list[dict]\|None]` | Per-attempt validation results from `patch_dag` (list of `{"valid": bool, "error_category": str\|None}`); set by `patch_dag`, read by `pipeline.py` for single-point `dag_stats` recording |
+| `ctx_dag_result` | `ContextVar[dict\|None]` | Final validated DAG object (if valid) or `None` (if all retries exhausted and item fell back to no-plan); set by `patch_dag`, read by `pipeline.py` |
+| `ctx_last_call_id` | `ContextVar[str\|None]` | The `call_id` returned by `call_recorder.record()` for the most recent LLM call in this context. Set by `recording_chat` in `patch_request_gpt.py`; read by `patch_dag.py` to annotate the call record after DAG validation. Defaults to `None`. |
 
-`contextvars` propagate correctly across `concurrent.futures` and `asyncio` tasks. When a new thread-pool task is submitted for a DAG node, the parent copies its context into the child via `contextvars.copy_context().run(...)`. This ensures the call recorder in `patch_request_gpt.py` always reads the correct item/stage/node, even under within-item concurrency.
+`contextvars` do **not** propagate automatically across `concurrent.futures` thread pool tasks. When a new thread-pool task is submitted for a DAG node, the submitting code must explicitly copy and propagate the current context via `contextvars.copy_context().run(...)`. This ensures the call recorder in `patch_request_gpt.py` reads the correct item/stage/node context, even under within-item concurrency. Failing to propagate the context would cause call records to be tagged with the wrong item or stage.
 
 **Migration from thread-locals:** All references to `_current_stage`, `_current_attempt` (previously `threading.local()`) in `patch_request_gpt.py` and `patch_dag.py` are replaced by reads from these `ContextVar` objects.
+
+#### `src/call_recorder.py` — Thread-Safe LLM Call Accumulator
+
+Provides the `CallRecorder` class that accumulates `llm_calls` entries during a pipeline run. Constructed in `main.py` (and `test_main.py`) and passed to `patch_request_gpt.init_patches(...)`.
+
+**Public API:**
+
+- `CallRecorder()` — constructor; internal state protected by `threading.Lock`.
+- `record(stage, prompt, response_text, finish_reason, usage, model, attempt, error, temperature, top_p, top_k, frequency_penalty, presence_penalty, seed) -> str` — records one LLM call and returns a unique `call_id` (UUID string). Tags the record with the current `ctx_item_index` from `item_context` (via `contextvars`). Truncates `prompt` and `response_text` if `CONFIG_LOG_LLM_CALLS_MAX_CHARS > 0`.
+- `update(call_id, error=None, error_category=None)` — annotates an existing call record with post-hoc validation results. Used by `patch_dag.py` to set `error` and `error_category` on the `dag_generation` call that produced an invalid DAG. Only these two fields may be updated; all other fields are immutable after `record()`.
+- `get_calls_for_item(item_index) -> list[dict]` — returns all call records tagged with the given item index, sorted by timestamp.
+- `flush_for_item(item_index)` — removes all records for the given item from the internal buffer (called after `pipeline.py` writes the item's result JSONL record). This bounds memory usage during long runs.
+
+**Thread safety:** All methods acquire the internal `threading.Lock`. The lock scope is narrow (dict insert/lookup), so contention is minimal even under high concurrency.
+
+**Called from:** `recording_chat` in `patch_request_gpt.py` calls `record()` and stores the returned `call_id` via `ctx_last_call_id` in `item_context`. `patch_dag.py` reads `ctx_last_call_id` and calls `update()` when DAG validation fails. `pipeline.py` calls `get_calls_for_item()` when writing result records and `flush_for_item()` afterward.
 
 #### `src/dag_executor.py` — Topo-Level Parallel DAG Executor
 
@@ -1000,30 +1393,25 @@ function execute_dag(dag, indexed_table, table_embeddings, question, config):
         retrieval_nodes = [n for n in frontier if n.Action == "Retrieval"]
         reasoning_nodes = [n for n in frontier if n.Action == "Reasoning"]
 
-        # --- Phase A: Execute retrieval nodes (batched embeddings) ---
+        # --- Batch-embed retrieval sub-questions (one call for the whole frontier) ---
         if retrieval_nodes:
-            # Gather all sub-questions for this frontier's retrieval nodes
             sub_questions = [node.Sub-Level-Question for node in retrieval_nodes]
-
-            # Batch-embed all sub-questions in one call
             embeddings = embedding_client.embed_batch(sub_questions, CONFIG_RETRIEVAL_EMBED_BATCH_SIZE)
+            # embeddings are pre-computed; individual retrieval tasks below use them
 
-            # Execute retrieval for each node concurrently (up to CONFIG_RETRIEVAL_PARALLELISM)
-            with ThreadPoolExecutor(CONFIG_RETRIEVAL_PARALLELISM) as pool:
-                for node, embedding in zip(retrieval_nodes, embeddings):
-                    submit: retrieve_for_node(node, embedding, indexed_table, table_embeddings)
-                    # uses upstream retrieve_top_relevant_rows_cols with pre-computed embedding
-            collect results into completed_states
-
-        # --- Phase B: Execute reasoning nodes concurrently ---
-        if reasoning_nodes:
-            with ThreadPoolExecutor(CONFIG_REASONING_PARALLELISM) as pool:
-                for node in reasoning_nodes:
-                    predecessor_states = {p: completed_states[p] for p in predecessors(node)}
-                    submit: reason_for_node(node, predecessor_states, sub_tables, question)
-                    # calls request_gpt_chat (→ SGLang) for each reasoning node
-                    # concurrent calls feed SGLang continuous batching
-            collect results into completed_states
+        # --- Launch ALL frontier nodes concurrently (retrieval + reasoning together) ---
+        with ThreadPoolExecutor(CONFIG_DAG_NODE_MAX_INFLIGHT) as pool:
+            futures = {}
+            for node in retrieval_nodes:
+                embedding = embeddings[retrieval_nodes.index(node)]
+                futures[pool.submit(retrieve_for_node, node, embedding, indexed_table, table_embeddings)] = node
+            for node in reasoning_nodes:
+                predecessor_states = {p: completed_states[p] for p in predecessors(node)}
+                futures[pool.submit(reason_for_node, node, predecessor_states, sub_tables, question)] = node
+            # Wait for all frontier tasks; concurrency is enforced internally
+            # by embedding_client and sglang_client (via their owned semaphores)
+            for future in as_completed(futures):
+                completed_states[futures[future]] = future.result()
 
         # --- Release successors ---
         for node in frontier:
@@ -1033,25 +1421,25 @@ function execute_dag(dag, indexed_table, table_embeddings, question, config):
                     ready.add(successor)
             ready.discard(node)
 
-    return final answer from terminal nodes
+    return (final_subtable, final_row_indices, final_col_indices)
 ```
 
 **Key design points:**
 
 - **Frontier = level:** A "frontier" (or "wave") is the set of nodes whose all predecessors have completed. This is identical to the **depth levels** used by `dag_stats` (BFS from roots). The executor's `wave_number` equals the stats' depth level. Sequential DAGs degenerate to one node per wave; parallel DAGs execute all independent branches in a single wave.
 
-- **Retrieval batching:** All retrieval nodes in the same frontier have their sub-question embeddings computed in a **single** `embed_batch()` call, avoiding N separate `embed_one()` calls. The `embed_batch` call acquires the `CONFIG_GLOBAL_EMBEDDING_CONCURRENCY` semaphore so cross-item concurrency is bounded. After embedding, individual retrieval operations (similarity search + keyword match + mapping) run concurrently because they are CPU-bound and do not contend with the GPU.
+- **Retrieval batching:** All retrieval nodes in the same frontier have their sub-question embeddings computed in a **single** `embed_batch()` call before any node tasks launch, avoiding N separate `embed_one()` calls. The `embed_batch` call acquires the `CONFIG_GLOBAL_EMBEDDING_CONCURRENCY` semaphore so cross-item concurrency is bounded.
 
-- **Reasoning concurrency:** All reasoning nodes in the same frontier issue their `request_gpt_chat(...)` calls concurrently. SGLang's continuous batching server-side combines these into GPU batches automatically. The `CONFIG_SGLANG_CLIENT_CONCURRENCY` semaphore caps total outstanding HTTP requests across all items.
+- **Concurrent retrieval + reasoning:** After embeddings are pre-computed, **all** frontier nodes (both retrieval and reasoning) are submitted to the thread pool concurrently. Retrieval nodes use the pre-computed embeddings for CPU-bound similarity search; reasoning nodes issue `request_gpt_chat(...)` calls. This maximizes parallelism within each frontier — retrieval and reasoning tasks from the same wave overlap rather than running in strict sequential phases. Each client method acquires its owned semaphore internally before performing the operation.
 
 - **No algorithm changes:** The actual retrieval logic (`retrieve_top_relevant_rows_cols`, `retrieve_rows_by_string_match`, sub-table mapping) and reasoning logic (`generate_final_answer_DAG`) are called exactly as-is from the upstream code. The executor only changes **when** they run, not **what** they compute.
 
-- **Context propagation:** Before submitting each node task, the executor sets `ctx_stage` to `"retrieval"` or `"reasoning"` and `ctx_node_id` to the node's ID, using `contextvars.copy_context().run(...)`. This ensures the call recorder correctly tags every LLM/embedding call.
+- **Context propagation:** Before submitting each node task, the executor sets `ctx_stage` to `"retrieval"` or `"reasoning"` (for intermediate DAG nodes) and `ctx_node_id` to the node's ID, using `contextvars.copy_context().run(...)`. For the terminal answer-generation call, `ctx_stage` is set to `"final_reasoning"`. This ensures the call recorder correctly tags every LLM/embedding call.
 
-- **Global concurrency limiters:** Two shared `threading.Semaphore` objects are created at startup and passed into the executor:
-  - `llm_semaphore(CONFIG_SGLANG_CLIENT_CONCURRENCY)` — acquired around every `request_gpt_chat` call.
-  - `embed_semaphore(CONFIG_GLOBAL_EMBEDDING_CONCURRENCY)` — acquired around every `embed_batch` call.
-  - These are shared across all items (all `CONFIG_MAX_WORKERS` threads), preventing resource exhaustion when high cross-item parallelism meets high within-item frontier width.
+- **Global concurrency limiters:** Two shared `threading.Semaphore` objects are created at startup and owned by the respective clients:
+  - `llm_semaphore(CONFIG_SGLANG_CLIENT_CONCURRENCY)` — owned by `sglang_client`, acquired inside `chat()` and `chat_with_metadata()`.
+  - `embed_semaphore(CONFIG_GLOBAL_EMBEDDING_CONCURRENCY)` — owned by `embedding_client`, acquired inside `embed_one()` and `embed_batch()`.
+  - The executor does **not** manage semaphores directly; it calls the client methods, which enforce concurrency internally. This prevents resource exhaustion when high cross-item parallelism meets high within-item frontier width.
 
 #### `src/patch_dag_execution.py` — Monkey-Patch for Parallel DAG Execution
 
@@ -1077,18 +1465,14 @@ def parallel_retrieve(dag_plan, indexed_table, table_embeddings, question):
     return dag_executor.execute_dag(
         dag_plan, indexed_table, table_embeddings, question,
         config=config,
-        llm_semaphore=llm_semaphore,
-        embed_semaphore=embed_semaphore,
     )
 
 gst.retrieve_final_subtable_DAG_save_embedding = parallel_retrieve
 ```
 
-The replacement function returns the same `(final_subtable, final_row_indices, final_col_indices)` tuple that the upstream code expects. After this patch, `process_single_table` calls the parallel executor transparently.
+The replacement function returns the same `(final_subtable, final_row_indices, final_col_indices)` tuple that the upstream code expects. After this patch, `process_single_table` calls the parallel executor transparently. The executor handles **only** retrieval nodes and intermediate reasoning nodes needed to produce the final subtable — it does **not** perform the terminal `generate_final_answer_DAG(...)` call. That call remains in `process_single_table` as the single final-answer step, unpatched, using the subtable returned by the executor.
 
-For the reasoning phase, the executor's last wave produces the final reasoning result. The executor calls `generate_final_answer_DAG(...)` for terminal reasoning nodes as part of its wave loop, using the same prompt and upstream function. The `patch_dag_execution` also patches the call to `generate_final_answer_DAG` inside `process_single_table` to be a no-op (or to use the pre-computed result from the executor), since the executor already handles it.
-
-**Scope:** Only scheduling and batching change. No retrieval algorithm, similarity function, table mapping, or prompt template is modified.
+**Scope:** Only scheduling and batching of retrieval + intermediate reasoning nodes change. The final answer generation call, retrieval algorithms, similarity functions, table mapping, and prompt templates are not modified.
 
 #### 4c. Executor Telemetry (per-item and aggregate)
 
@@ -1116,11 +1500,11 @@ Additionally:
 
 #### `src/patch_dag.py` — Monkey-Patch Bridge (DAG Capture + Prompt Override)
 
-Replaces the upstream `generate_dag.get_dag` with a new implementation that (a) uses the module's shipped prompt template (no question-type routing), (b) concatenates all few-shot examples, and (c) feeds every produced (or failed) DAG into `dag_stats`. This must be applied **after** `patch_request_gpt` (so the LLM route is already in place) but **before** any module that binds `get_dag` at import time.
+Replaces the upstream `generate_dag.get_dag` with a new implementation that (a) uses the module's vendored prompt template (no question-type routing), (b) concatenates all few-shot examples per `CONFIG_FEWSHOT_VARIANT`, and (c) captures per-attempt DAG metadata for downstream stats recording. This patch is **always applied** (not gated on `CONFIG_DAG_STATS_ENABLE`) because it is required for prompt override and question-type removal. When `aggregator` is `None`, stats recording is skipped but all other behavior is unchanged. This must be applied **after** `patch_request_gpt` (so the LLM route is already in place) but **before** any module that binds `get_dag` at import time.
 
 **How it works:**
 
-1. At init time (`init_patches(aggregator, config)`):
+1. At init time (`init_patches(aggregator, config, call_recorder=None)`):
    a. **Resolve the DAG prompt template path:** If `CONFIG_PLAN_PROMPT` is non-empty, use it verbatim. Otherwise, resolve from `CONFIG_DAG_PROMPT_VARIANT`:
       - `DAG_PROMPT_STANDARD` → `prompt/get_dag.md` (§4a).
       - `DAG_PROMPT_MIN_DEPTH_BASELINE` → `prompt/get_dag_min_depth.md` (§4a-baseline).
@@ -1131,16 +1515,16 @@ Replaces the upstream `generate_dag.get_dag` with a new implementation that (a) 
       - `FEWSHOT_PARALLEL_HYBRID_EXTENDED` → `[fewshot_parallel.txt, fewshot_hybrid.txt, fewshot_parallel_extended.txt, fewshot_hybrid_extended.txt]`.
       Concatenate the resolved files in the listed order into a single string. Store the resolved file paths as `self.fewshot_files` and the variant string (`"all3"` or `"parallel_hybrid_extended"`) as `self.fewshot_variant` for metadata/logging. The few-shot selection is independent of the DAG prompt variant and can be combined with either.
    d. Import the original `validate_dag` from `scripts.generate_dag`.
-2. Define `replacement_get_dag(table, question, dag_prompt_template)`:
-   - Note: this function takes **three** arguments (no `question_type`). The caller (`process_single_table` in the upstream code) currently passes four arguments including `question_type`; `patch_dag` also patches the call-site binding so the extra argument is dropped (or alternatively wraps with `*args` and ignores the third positional argument — either approach is documented in the implementation).
+2. Define `replacement_get_dag(*args, **kwargs)`:
+   - The replacement function accepts `*args, **kwargs` to be compatible with any upstream call signature (the original `get_dag` takes `table, question, dag_prompt_template, question_type`). It extracts `table` from `args[0]` or `kwargs.get('table', kwargs.get('table_text'))`, and `question` from `args[1]` or `kwargs.get('question', kwargs.get('statement'))`, to handle both positional and keyword invocations robustly. All remaining arguments are ignored. This is the sole compatibility strategy — no call-site patching is needed.
    - Samples the table, converts to markdown (reusing `sample_table_rows` + `list_to_markdown`).
-   - Formats the shipped template with `{fewshot}` (the pre-concatenated examples), `{question}`, and `{table}`.
+   - Renders the shipped Jinja2 template via `jinja2.Template(template_text).render(fewshot=..., question=..., table=...)`.
    - Maintains per-item lists: `attempt_results: list[dict]` tracking each attempt's outcome.
-   - Retries up to `CONFIG_DAG_MAX_RETRIES` times: call `request_gpt_chat(prompt)`, then `validate_dag(response)`. Track attempt count via `ctx_attempt` (contextvars). **For every attempt:**
+   - Retries up to `CONFIG_DAG_MAX_RETRIES` times: call `response_text = request_gpt_chat(prompt)` (returns `str`), then read `call_id = ctx_last_call_id.get()` from `item_context`, then `validate_dag(response_text)`. Track attempt count via `ctx_attempt` (contextvars). **For every attempt:**
      - If `validate_dag` succeeds: append `{"valid": True, "error_category": None}` to `attempt_results`.
-     - If `validate_dag` raises `ValueError` (or returns `None`): catch the exception, classify the error message into a normalized category (see **Validity error categories** below), append `{"valid": False, "error_category": "<category>"}` to `attempt_results`, and report the attempt to `dag_stats.record_attempt(error_category=category)`.
-   - On success: pass the DAG and `attempt_results` to `dag_stats.record_dag(question, dag, attempts=counter, attempt_results=attempt_results)`, return the DAG.
-   - On exhaustion: call `dag_stats.record_failure(question, attempts=counter, attempt_results=attempt_results)`, re-raise so the caller's existing fallback logic (`generate_noplan_answer`) still runs.
+     - If `validate_dag` raises `ValueError` (or returns `None`): catch the exception, classify the error message into a normalized category (see **Validity error categories** below), append `{"valid": False, "error_category": "<category>"}` to `attempt_results`, and — if `call_recorder` is not `None` — call `call_recorder.update(call_id, error="DAG validation failed: <message>", error_category="<category>")` to annotate the LLM call record with the validation failure. If `call_recorder` is `None` (logging disabled), the `update()` call is skipped; the `attempt_results` list still records the error category for `dag_stats` use.
+   - On success: set `ctx_dag_attempt_results.set(attempt_results)` and `ctx_dag_result.set(dag)` in `item_context`, then return the DAG. **`patch_dag` does NOT call `dag_stats.record_dag()` directly** — that is `pipeline.py`'s responsibility (see §4 `pipeline.py` Step 2).
+   - On exhaustion: set `ctx_dag_attempt_results.set(attempt_results)` and `ctx_dag_result.set(None)` in `item_context`, then re-raise so the caller's existing fallback logic (`generate_noplan_answer`) still runs. **`patch_dag` does NOT call `dag_stats.record_failure()` directly.**
 3. Replace `generate_dag.get_dag = replacement_get_dag` in the module namespace.
 
 **Validity error categories:** The upstream `validate_dag` raises `ValueError` with a free-text message. The wrapper normalizes each message into one of the following stable categories by substring matching:
@@ -1158,9 +1542,9 @@ Replaces the upstream `generate_dag.get_dag` with a new implementation that (a) 
 
 The mapping is a simple ordered list of `(substrings, category)` pairs checked in order; the first match wins. This gives a stable, small set of error categories suitable for aggregation. If the upstream validator changes its message text, only this mapping needs updating. The raw error message is still preserved in `attempt_results` for debugging.
 
-**Key difference from upstream `get_dag`:** The upstream function selects a per-type few-shot file based on a `question_type` argument looked up from a label file. The replacement function ignores any question type, always includes all few-shot examples, and uses the shipped template (§4a) which has no `{question_type}` placeholder. There is no classifier, no label file, and no per-type routing.
+**Key difference from upstream `get_dag`:** The upstream function selects a per-type few-shot file based on a `question_type` argument looked up from a label file. The replacement function ignores any question type, always includes all few-shot examples, and uses the shipped template (§4a) which has no `{{ question_type }}` placeholder. There is no classifier, no label file, and no per-type routing.
 
-**Capturing retry counts and per-attempt results:** Each call to `validate_dag` that returns `None` or raises increments a `contextvars` counter (`ctx_attempt` from `item_context.py`) and appends to the per-item `attempt_results` list. When `replacement_get_dag` returns (success) or raises (failure), both the counter value and the full `attempt_results` are passed to `dag_stats`, then reset. `contextvars` ensures correctness under both cross-item `ThreadPoolExecutor` and within-item concurrent execution.
+**Capturing retry counts and per-attempt results:** Each call to `validate_dag` that returns `None` or raises increments a `contextvars` counter (`ctx_attempt` from `item_context.py`) and appends to the per-item `attempt_results` list. When `replacement_get_dag` returns (success) or raises (failure), `attempt_results` are stored in `ctx_dag_attempt_results` and the final DAG (or `None`) in `ctx_dag_result` — both defined in `item_context.py`. These context variables are read by `pipeline.py` after the item completes, which makes the **single** `dag_stats` recording call with all fields including `is_correct_numeric`. `contextvars` ensures correctness under both cross-item `ThreadPoolExecutor` and within-item concurrent execution.
 
 **Expected DAG schema (from `get_dag` return value):**
 
@@ -1185,9 +1569,8 @@ Collects per-item DAG metrics during the run and computes aggregate statistics a
 
 **Public API:**
 
-- `record_dag(question, dag, attempts, attempt_results, is_correct)` — called for every item that produced a valid DAG. `is_correct` is a bool derived from the upstream `is_correct` field.
-- `record_failure(question, attempts, attempt_results, is_correct)` — called when all retries are exhausted and the item fell back to no-plan reasoning.
-- `record_attempt(error_category)` — called by `patch_dag.py` for each individual failed `validate_dag` attempt; feeds the global error counters. (Also implicitly fed by `attempt_results` passed to `record_dag`/`record_failure`.)
+- `record_dag(question, dag, attempts, attempt_results, is_correct)` — called for every item that produced a valid DAG. `is_correct` is a bool derived from the upstream `is_correct` field. Per-attempt error statistics (validity error counts, category breakdown) are derived from the `attempt_results` list — each entry's `error_category` feeds the global error counters.
+- `record_failure(question, attempts, attempt_results, is_correct)` — called when all retries are exhausted and the item fell back to no-plan reasoning. Per-attempt error statistics are derived from `attempt_results` identically to `record_dag`.
 - `compute_summary() -> dict` — aggregates all recorded per-item metrics.
 - `write_summary(path)` / `print_summary()` — output.
 
@@ -1305,6 +1688,11 @@ Over all items that produced a valid DAG (plus failed items if `CONFIG_DAG_STATS
 
 These metadata fields allow aggregate stats files to be unambiguously tied to the prompt variant and few-shot set used, supporting automated comparison scripts.
 
+**Checkpoint provenance metadata (present when the run is a post-training test evaluation via `test_main.py`):**
+- `checkpoint_source`: `"best"`, `"latest"`, `"merged"`, or `"explicit_path"`.
+- `checkpoint_path`: resolved absolute path of the checkpoint used.
+- `checkpoint_step`: training step of the checkpoint (from metadata, or `null`).
+
 **Output:**
 
 - `write_summary(path)` writes the aggregate dict to `CONFIG_DAG_STATS_FILE` as pretty-printed JSON. A CSV sidecar (`<basename>.csv`) with one row per metric and columns `[metric, mean, var, min, p50, p90, p95, max]` is written alongside. The CSV includes rows for `correctness`, `dag_depth`, `dag_validity_final`, and `dag_validity_attempt` alongside all existing structural/executor metrics.
@@ -1313,20 +1701,27 @@ These metadata fields allow aggregate stats files to be unambiguously tied to th
 
 #### `src/pipeline.py` — Orchestration
 
-The pipeline runs the same two steps as the existing `run.sh`, but by calling the existing Python functions directly (not shelling out):
+The pipeline runs the same two steps as the existing `run.sh`, but by calling the existing Python functions directly (not shelling out). **All inference and baseline runs (`make run`, `make run-baseline`, `make run-baseline-fewshot-ph-ext`) evaluate only the configured test split.** Train and validation examples are never processed during inference.
+
+**Step 0: Resolve test split** (split-mode-aware data selection)
+- When `CONFIG_SPLIT_MODE=SPLIT_MODE_EXPLICIT_INDICES`: the pipeline loads exactly the examples specified by the union of `CONFIG_SPLIT_TEST_WIKITQ_4K_INDICES`, `CONFIG_SPLIT_TEST_WIKITQ_PLUS_INDICES`, and `CONFIG_SPLIT_TEST_SCALABILITY_INDICES` from the canonical dataset registry. Each loaded example carries `source_dataset` and `source_index` metadata. If the resulting test split is empty, startup has already raised a `ValueError` (see `config.py` validation).
+- When `CONFIG_SPLIT_MODE=SPLIT_MODE_SEEDED_RATIO`: the pipeline loads the dataset file from `CONFIG_INFERENCE_DATASET_PATH` (default: `dataset/WikiTQ-4k/test.jsonl`). This is a separate symbol from `CONFIG_TRAIN_DATASET_PATH` so that inference always defaults to the test split while training defaults to the train split. Each example's `source_dataset` is derived from the `CONFIG_DATASET` choice and `source_index` is its line index in the source file.
+- When `CONFIG_SPLIT_MODE=SPLIT_MODE_OVERFIT_POC`: the test split is the **same tiny subset** used for training. All evaluation in this mode — including `make run`, `make test-trained`, and baselines — operates on the tiny subset. This is intentional: the PoC validates plumbing, not generalization.
+- The resolved test examples are the **only** data processed by steps 1–3. Baselines (`make run-baseline`, `make run-baseline-fewshot-ph-ext`) follow the exact same test-split resolution; their defconfigs inherit the split mode and index settings from the active `.config`.
 
 **Step 1: Compute Embeddings** (calls into `save_embeddings.process_table_embeddings`)
-- Input: dataset path from config, col prompt path from config.
+- Input: test split examples from Step 0, col prompt path from config.
 - Output: `CONFIG_EMBEDDING_CACHE` file.
-- Skips tables already in the cache file (existing behavior).
+- Skips tables already in the persistent embedding cache file (existing behavior).
 
 **Step 2: Run Reasoning** (calls into `final_reasoning_multi_thread_save_embedding.main`'s logic)
 - Loads prompts and embedding map (no question-type map is needed; the DAG prompt includes all few-shot examples and the LLM selects the structure).
+- **Iterates only over the test split examples** resolved in Step 0. Train and validation examples are never loaded or processed.
 - Uses `ThreadPoolExecutor(max_workers=CONFIG_MAX_WORKERS)` for **cross-item** parallelism: multiple items are processed concurrently.
 - Calls `process_single_table(...)` for each entry. Thanks to `patch_dag_execution`, the DAG execution **within each item** is also parallelized: independent nodes in the same frontier run concurrently, retrieval embeddings are batched, and reasoning LLM calls are issued concurrently to feed SGLang's continuous batching.
 - Cross-item and within-item concurrency are bounded by the global semaphores (`CONFIG_SGLANG_CLIENT_CONCURRENCY` for LLM calls, `CONFIG_GLOBAL_EMBEDDING_CONCURRENCY` for embedding batches), preventing resource exhaustion.
-- After each item completes, the pipeline reads the upstream `is_correct` field from the result record, converts it to `is_correct_numeric` (`1` or `0`), and passes it to `dag_stats.record_dag(...)` or `dag_stats.record_failure(...)` so that correctness is captured alongside DAG metrics.
-- Writes results to `CONFIG_RESULT_FILE`. The always-present fields (`is_correct_numeric`, `dag_depth`, `dag_validity_final`, `invalid_dag_attempts`, `validity_error_types_seen`) are appended to each result record before writing.
+- **Single DAG-stats recording point:** After each item completes, the pipeline reads the upstream `is_correct` field from the result record (converts to `is_correct_numeric`), then reads `ctx_dag_attempt_results.get()` and `ctx_dag_result.get()` from `item_context` (set by `patch_dag` during DAG generation). If `ctx_dag_result` is not `None` (valid DAG), calls `dag_stats.record_dag(question, dag, attempts, attempt_results, is_correct)`; otherwise calls `dag_stats.record_failure(question, attempts, attempt_results, is_correct)`. This is the **only** place where `dag_stats` recording happens — `patch_dag` stores metadata in context variables but does not call the aggregator directly. This avoids double-counting items.
+- Writes results to `CONFIG_RESULT_FILE`. Each result record includes `source_dataset` and `source_index` (from the split metadata), plus the always-present fields (`is_correct_numeric`, `dag_depth`, `dag_validity_final`, `invalid_dag_attempts`, `validity_error_types_seen`).
 
 **Step 3: DAG Statistics (if `CONFIG_DAG_STATS_ENABLE`):**
 - After all items have been processed, call `dag_stats.compute_summary()`.
@@ -1337,9 +1732,9 @@ The pipeline runs the same two steps as the existing `run.sh`, but by calling th
 
 **Baseline consistency:** Steps 2 and 3 execute identically regardless of which baseline configuration is active. The active `dag_prompt_variant`, `fewshot_variant`, and their resolved paths are recorded in run metadata but do not change the statistics collection or aggregation logic. Each baseline's shipped defconfig writes to a different `CONFIG_DAG_STATS_FILE` path (e.g. `output/dag_stats.json`, `output/dag_stats_min_depth.json`, `output/dag_stats_fewshot_ph_ext.json`), so results from different runs are directly comparable without overwriting.
 
-Both steps are called from within the same Python process, after `patch_request_gpt.init_patches(...)` and `patch_dag.init_patches(dag_stats_aggregator)` have been applied, so all existing functions use the local models and every DAG is automatically captured.
+Both steps are called from within the same Python process, after `patch_request_gpt.init_patches(...)`, `patch_dag.init_patches(aggregator, config, call_recorder=...)`, and `patch_dag_execution.init_patches(...)` have been applied, so all existing functions use the local models, the shipped prompt template is active, and every DAG is automatically captured.
 
-**Working directory:** The pipeline temporarily adds `/workspace/AixelAsk/AixelAsk` to `sys.path` and uses `os.chdir()` (or explicit path resolution) so that the existing scripts' relative path references (`prompt/...`, `dataset/...`) resolve correctly. All paths in `.config` are resolved to absolute paths at startup.
+**Working directory and path resolution:** The pipeline adds `/workspace/AixelAsk/AixelAsk` to `sys.path` so that upstream script imports (`from utils.request_gpt import ...`, etc.) resolve correctly. **Prompt paths** are resolved relative to the `nlp_project` root (where vendored `prompt/` lives), **not** the upstream repo — `os.chdir()` into the upstream directory is not used for prompt resolution. **Dataset paths** are resolved against the AixelAsk repo root (`/workspace/AixelAsk/AixelAsk`) since datasets ship with the upstream repo. All paths in `.config` are resolved to absolute paths at startup by `config.py`.
 
 #### `src/download_models.py` — Offline Model Download
 
@@ -1348,25 +1743,25 @@ Downloads both models **without** starting the SGLang server. Uses `huggingface_
 ```python
 from huggingface_hub import snapshot_download
 
+# config.py has already set HF_HOME = config.MODEL_CACHE_DIR,
+# so snapshot_download uses $HF_HOME/hub/ automatically.
 snapshot_download(
     repo_id=config.INFERENCE_MODEL,
     revision=config.INFERENCE_MODEL_REVISION,
-    cache_dir=config.MODEL_CACHE_DIR
 )
 snapshot_download(
     repo_id=config.EMBEDDING_MODEL,
-    cache_dir=config.MODEL_CACHE_DIR
 )
 ```
 
-Callable as `python -m src.download_models --config .config`. Also invoked by `main.py --download-only`. After this, the models are cached locally and subsequent `make run` / `make server-start` will not need network access.
+Callable as `python -m src.download_models --config .config`. Also invoked by `main.py --download-only`. Since `config.py` sets `HF_HOME` to `CONFIG_MODEL_CACHE_DIR` (default `/workspace/.cache/huggingface`), both calls store models under `$HF_HOME/hub/` on the persistent Volume disk. Subsequent `make run` / `make server-start` will not need network access. The cache persists across Pod stop/start cycles.
 
 The previous approach (starting SGLang briefly to trigger download as a side-effect) is kept as a documented fallback if `huggingface_hub` is unavailable, but the default `make download` path is now the pure-download approach.
 
-#### `src/main.py` — Entrypoint
+#### `src/main.py` — Inference/Evaluation Entrypoint
 
 ```
-python -m src.main --config .config [--download-only]
+python -m src.main --config .config [--download-only] [--override KEY=VALUE ...]
 ```
 
 1. Parse `.config` via `config.py`.
@@ -1375,14 +1770,14 @@ python -m src.main --config .config [--download-only]
 4. Start SGLang server via `sglang_server.start()`.
 5. Wait for health check (primary + fallback probes).
 6. Initialize `sglang_client` and `embedding_client`.
-7. Create global concurrency limiters:
-   - `llm_semaphore = Semaphore(CONFIG_SGLANG_CLIENT_CONCURRENCY)`
-   - `embed_semaphore = Semaphore(CONFIG_GLOBAL_EMBEDDING_CONCURRENCY)`
+7. Create global concurrency limiters and pass them to clients:
+   - `llm_semaphore = Semaphore(CONFIG_SGLANG_CLIENT_CONCURRENCY)` — passed to `sglang_client` at init; enforced internally by `chat()` and `chat_with_metadata()`.
+   - `embed_semaphore = Semaphore(CONFIG_GLOBAL_EMBEDDING_CONCURRENCY)` — passed to `embedding_client` at init; enforced internally by `embed_one()` and `embed_batch()`.
 8. Apply monkey-patches (order matters):
-   a. `patch_request_gpt.init_patches(sglang_client, embedding_client, config, call_recorder, llm_semaphore)` — routes LLM + embedding calls to local models, installs recording wrapper + concurrency limiter.
-   b. If `CONFIG_DAG_STATS_ENABLE`: instantiate `dag_stats.DagStatsAggregator(config)`, then `patch_dag.init_patches(aggregator)` — wraps `get_dag` and `validate_dag` to capture DAGs and retry counts.
-   c. `patch_dag_execution.init_patches(config, llm_semaphore, embed_semaphore)` — replaces upstream sequential DAG execution with `dag_executor.execute_dag(...)`.
-9. Run `pipeline.run(config)`.
+   a. `patch_request_gpt.init_patches(sglang_client, embedding_client, config, call_recorder=call_recorder)` — routes LLM + embedding calls to local models, installs recording wrapper if logging is enabled. Does **not** receive semaphores; concurrency is enforced inside the clients.
+   b. `patch_dag.init_patches(aggregator, config, call_recorder=call_recorder)` — **always applied** (required for prompt override, question-type removal, all-fewshot concatenation, and DAG capture). If `CONFIG_DAG_STATS_ENABLE`: `aggregator = dag_stats.DagStatsAggregator(config)`; otherwise `aggregator = None` (patch_dag still performs prompt/fewshot overrides but skips stats recording when aggregator is None). `call_recorder` may be `None` when logging is disabled.
+   c. `patch_dag_execution.init_patches(config)` — replaces upstream sequential DAG execution with `dag_executor.execute_dag(...)`. Does **not** receive semaphores; the executor calls `embedding_client.embed_batch()` and `request_gpt_chat()` (which routes to `sglang_client.chat()`), both of which enforce their own semaphores internally.
+9. Run `pipeline.run(config)` — evaluates the **test split only** (see `pipeline.py` Step 0 for split resolution).
 10. Print summary (accuracy, count, errors).
 11. If `CONFIG_DAG_STATS_ENABLE`: print DAG stats summary (including executor telemetry).
 12. Stop SGLang server via `sglang_server.stop()` (also via `atexit`).
@@ -1393,10 +1788,10 @@ python -m src.main --config .config [--download-only]
 
 | Model | Mechanism | Cache Location | Reuse |
 |-------|-----------|----------------|-------|
-| `mistralai/Mistral-7B-Instruct-v0.3` | `huggingface_hub.snapshot_download(repo_id=..., revision=CONFIG_INFERENCE_MODEL_REVISION, cache_dir=...)` | `CONFIG_MODEL_CACHE_DIR` (default `~/.cache/huggingface/hub`) | Subsequent runs reuse cached weights |
-| `nomic-ai/nomic-embed-text-v1` | `huggingface_hub.snapshot_download(repo_id=..., cache_dir=...)` | Same HF cache dir | Subsequent runs reuse cached weights |
+| `mistralai/Mistral-7B-Instruct-v0.3` | `huggingface_hub.snapshot_download(repo_id=..., revision=CONFIG_INFERENCE_MODEL_REVISION)` | `$HF_HOME/hub/` (derived from `CONFIG_MODEL_CACHE_DIR`; default `/workspace/.cache/huggingface/hub/`) | Persistent on Volume disk; survives Pod stop/start |
+| `nomic-ai/nomic-embed-text-v1` | `huggingface_hub.snapshot_download(repo_id=...)` | Same `$HF_HOME/hub/` directory | Survives Pod stop/start |
 
-`make download` calls `python -m src.download_models --config .config`, which runs `snapshot_download` for both models and exits. **No SGLang server is started.** Both calls respect `HF_HOME` / `TRANSFORMERS_CACHE` env vars and `CONFIG_MODEL_CACHE_DIR`.
+`make download` calls `python -m src.download_models --config .config`, which runs `snapshot_download` for both models and exits. **No SGLang server is started.** Since `config.py` sets `HF_HOME` and `TRANSFORMERS_CACHE` to `CONFIG_MODEL_CACHE_DIR` before any HF import, all downloads land in `$HF_HOME/hub/` (default `/workspace/.cache/huggingface/hub/`) on the persistent Volume disk. Models only need to be downloaded once per Volume and survive Pod restarts.
 
 **Fallback:** If `huggingface_hub` is unavailable (unlikely given the requirements), the download target falls back to the old approach: start SGLang briefly (which downloads the inference model as a side effect), then initialize `SentenceTransformer(...)` (which downloads the embedding model). This fallback is documented but not the default path.
 
@@ -1422,16 +1817,17 @@ main.py
   │           └── On timeout: kill, print last 50 stderr lines + launch cmd + env vars, raise
   ├── 6. Init sglang_client (OpenAI SDK → localhost:port)
   ├── 7. Init embedding_client (SentenceTransformer → GPU/CPU, prefix mode from config)
-  ├── 8. Create global semaphores:
-  │       ├── llm_semaphore = Semaphore(CONFIG_SGLANG_CLIENT_CONCURRENCY)
-  │       └── embed_semaphore = Semaphore(CONFIG_GLOBAL_EMBEDDING_CONCURRENCY)
+  ├── 8. Create global semaphores and pass to clients:
+  │       ├── llm_semaphore = Semaphore(CONFIG_SGLANG_CLIENT_CONCURRENCY) → owned by sglang_client
+  │       └── embed_semaphore = Semaphore(CONFIG_GLOBAL_EMBEDDING_CONCURRENCY) → owned by embedding_client
   ├── 9. Apply monkey-patches (in order):
-  │       ├── a. patch_request_gpt.init_patches(..., llm_semaphore)
-  │       ├── b. patch_dag.init_patches(aggregator) [if DAG stats enabled]
-  │       └── c. patch_dag_execution.init_patches(config, llm_semaphore, embed_semaphore)
-  ├── 10. pipeline.run()
-  │       ├── Step 1: save_embeddings (if cache missing/incomplete)
-  │       ├── Step 2: final_reasoning (cross-item ThreadPoolExecutor + within-item parallel DAG executor)
+  │       ├── a. patch_request_gpt.init_patches(sglang_client, embedding_client, config, call_recorder)
+  │       ├── b. patch_dag.init_patches(aggregator, config, call_recorder) [always; aggregator=None if stats disabled]
+  │       └── c. patch_dag_execution.init_patches(config)
+  ├── 10. pipeline.run() — TEST SPLIT ONLY
+  │       ├── Step 0: resolve test split (explicit indices or seeded, per CONFIG_SPLIT_MODE)
+  │       ├── Step 1: save_embeddings for test examples (if persistent embedding cache missing/incomplete)
+  │       ├── Step 2: final_reasoning on test split only (cross-item ThreadPoolExecutor + within-item parallel DAG executor)
   │       └── Step 3: dag_stats.write_summary() + dag_stats.print_summary() [if enabled]
   ├── 11. Print accuracy summary
   └── 12. sglang_server.stop()
@@ -1448,9 +1844,10 @@ main.py
 
 ### 7. Logging and Error Handling
 
-- **Library:** Python `logging` module.
-- **Format:** `%(asctime)s [%(levelname)s] %(name)s: %(message)s`
-- **Outputs:** Both `CONFIG_LOG_FILE` and stderr.
+- **Library:** Python `logging` module with **Rich** for console output.
+- **Console handler:** `rich.logging.RichHandler` provides structured, colorized console output with tracebacks. Progress bars use `rich.progress` instead of `tqdm` for interactive terminals (`tqdm` remains as a fallback for non-interactive/CI environments).
+- **File handler:** Standard `logging.FileHandler` writes to `CONFIG_LOG_FILE` with format `%(asctime)s [%(levelname)s] %(name)s: %(message)s`.
+- **Outputs:** Both `CONFIG_LOG_FILE` (plain text) and stderr (Rich-formatted).
 - **Levels:** Configurable via `CONFIG_LOG_LEVEL`.
 - **What is logged:**
   - Server lifecycle events (start, health poll, ready, stop).
@@ -1466,12 +1863,14 @@ main.py
 
 1. Create a tiny 3-row dataset `.jsonl` file.
 2. Run the full pipeline with `CONFIG_MAX_WORKERS=1` and `CONFIG_DAG_STATS_ENABLE=y`.
-3. Assert: result file exists, contains entries with required fields (`question`, `pred_answer`, `is_correct`), plus the module-added fields (`is_correct_numeric`, `dag_depth`, `dag_validity_final`, `invalid_dag_attempts`, `validity_error_types_seen`).
-4. Assert: SGLang server was started and stopped cleanly.
-5. Assert: `CONFIG_DAG_STATS_FILE` exists, is valid JSON, and contains expected top-level keys (`total_items`, `total_with_dag`, `num_nodes`, `correctness`, `dag_depth`, `dag_validity_final`, `dag_validity_attempt`, `validity_errors`, etc.).
-6. **Requires:** GPU available, models downloaded.
+3. Assert: result file exists, contains entries with required fields (`question`, `pred_answer`, `is_correct`), plus the module-added fields (`source_dataset`, `source_index`, `is_correct_numeric`, `dag_depth`, `dag_validity_final`, `invalid_dag_attempts`, `validity_error_types_seen`).
+4. Assert: every result record has a valid `source_dataset` (one of `"wikitq_4k"`, `"wikitq_plus"`, `"scalability"`) and a non-negative integer `source_index`.
+5. Assert: SGLang server was started and stopped cleanly.
+6. Assert: `CONFIG_DAG_STATS_FILE` exists, is valid JSON, and contains expected top-level keys (`total_items`, `total_with_dag`, `num_nodes`, `correctness`, `dag_depth`, `dag_validity_final`, `dag_validity_attempt`, `validity_errors`, etc.).
+7. Assert: only test-split examples were processed (verify result count matches configured test split size, not the full dataset).
+8. **Requires:** GPU available, models downloaded.
 
-#### README Verification (`tests/test_readme.py` or as part of `test_smoke.py`)
+#### README Verification (part of `tests/test_smoke.py`)
 
 Static checks (no GPU required) that verify the project `README.md` is a concrete deliverable:
 
@@ -1479,9 +1878,36 @@ Static checks (no GPU required) that verify the project `README.md` is a concret
 - It is non-empty (at least 100 lines).
 - It mentions the main inference make targets: `run`, `run-baseline`, `run-baseline-fewshot-ph-ext`.
 - It mentions the main training make targets: `train-grpo`, `train-overfit-poc`, `resume-train`, `compile-curves`.
+- It mentions the post-training test evaluation targets: `test-trained`, `test-trained-best`, `test-trained-latest`.
+- It mentions checkpoint selection for post-training evaluation (`best`, `latest`, `merged`, explicit path).
 - It mentions `.config`, `defconfig`, `defconfig.train_grpo`, `defconfig.train_overfit_poc`.
 - It mentions output locations: `output/results`, `output/dag_stats`, `output/train`, `curves/pdf`.
 - It mentions `make menuconfig` and `requirements.txt`.
+- It mentions split modes (`SPLIT_MODE_SEEDED_RATIO`, `SPLIT_MODE_EXPLICIT_INDICES`, `SPLIT_MODE_OVERFIT_POC`) and per-dataset index lists.
+- It mentions that all baselines (`make run`, `make run-baseline`, `make run-baseline-fewshot-ph-ext`) evaluate only the configured test split.
+- It mentions Runpod storage / Volume disk / recommended disk sizing.
+- It mentions `PROJECT_DIR` (or equivalent wording) for prompt/vendored-file resolution vs. `CONFIG_PERSISTENT_ROOT` for output artifacts.
+
+**Storage path validation** (part of `test_config.py` or `test_smoke.py`):
+
+- Default `CONFIG_PERSISTENT_ROOT` resolves to a path under `/workspace`.
+- Default `CONFIG_MODEL_CACHE_DIR` resolves to a path under `/workspace`. The derived hub cache (`$HF_HOME/hub/`) also resolves under `/workspace`.
+- All default output paths (`CONFIG_RESULT_FILE`, `CONFIG_DAG_STATS_FILE`, `CONFIG_LOG_FILE`, `CONFIG_TRAIN_OUTPUT_DIR`, `CONFIG_TRAIN_STATS_FILE`, `CONFIG_TRAIN_STATS_PER_STEP_JSONL`, `CONFIG_TRAIN_STATS_PER_EVAL_JSONL`, `CONFIG_TRAIN_CURVES_DIR`) resolve to paths under `CONFIG_PERSISTENT_ROOT`.
+- `CONFIG_TRAIN_CHECKPOINT_PATH` (when set) resolves under `CONFIG_PERSISTENT_ROOT`.
+- `CONFIG_LLM_CALLS_SIDEFILE` (when set as relative, e.g. `"output/llm_calls.jsonl"`) resolves under `CONFIG_PERSISTENT_ROOT`.
+- `CONFIG_OVERFIT_POC_INDICES_FILE` (when set as relative) resolves under `CONFIG_PERSISTENT_ROOT`.
+- `CONFIG_MODEL_CACHE_DIR` given as a **relative** path (e.g. `.cache/hf`) resolves under `CONFIG_PERSISTENT_ROOT`, not under `$HOME` or `/root`.
+- `CONFIG_EPHEMERAL_TMPDIR` defaults to `/tmp` (not under `/workspace`).
+- No critical output path accidentally resolves to `/root`, `/home`, or `~/.cache` (all Container-only locations).
+- `PROJECT_DIR` resolves to the `nlp_project/` directory on disk (same as the default `CONFIG_PERSISTENT_ROOT` in the default layout, but immutable).
+- Prompt paths resolve under `PROJECT_DIR`, not under `CONFIG_PERSISTENT_ROOT` — verified by the negative test at the prompt path section above.
+
+**TeX compile storage tests** (part of `test_curves.py` or `test_tex_compile.py`):
+
+- Final curve PDFs are written under persistent `CONFIG_TRAIN_CURVES_DIR/pdf/`, not under `/tmp`.
+- `compile_status.json` is written under persistent `CONFIG_TRAIN_CURVES_DIR/manifests/`, not under `/tmp`.
+- TeX compile scratch (temp working directories, `.aux` files) is created under `CONFIG_EPHEMERAL_TMPDIR`, not under `CONFIG_TRAIN_CURVES_DIR`.
+- After a successful compilation, the temp directory is cleaned up and no intermediate files remain in `/tmp`.
 
 #### Unit Tests
 
@@ -1492,12 +1918,123 @@ Static checks (no GPU required) that verify the project `README.md` is a concret
 - Verify `CONFIG_LLM_MAX_OUTPUT_TOKENS` (not old name `CONFIG_LLM_MAX_TOKENS`) is recognized.
 - **Sampling param types:** Parse a config with `CONFIG_LLM_TEMPERATURE="0.7"`, `CONFIG_LLM_TOP_P="0.9"`, `CONFIG_LLM_FREQUENCY_PENALTY="0.5"`, `CONFIG_LLM_PRESENCE_PENALTY="-0.1"`, `CONFIG_LLM_TOP_K=50`, `CONFIG_LLM_SEED=42` → assert `config.LLM_TEMPERATURE == 0.7` (float), `config.LLM_TOP_P == 0.9` (float), `config.LLM_FREQUENCY_PENALTY == 0.5` (float), `config.LLM_PRESENCE_PENALTY == -0.1` (float), `config.LLM_TOP_K == 50` (int), `config.LLM_SEED == 42` (int).
 - **Sampling param defaults:** Parse a config with sampling params absent → verify defaults: `temperature=0.0`, `top_p=1.0`, `top_k=0`, `frequency_penalty=0.0`, `presence_penalty=0.0`, `seed=-1`.
-- **TabFact+ rejection:** Parse a config with `CONFIG_DATASET_CUSTOM_PATH="dataset/TabFact+/large_tabfact_test_data_str.jsonl"` → assert `ValueError` is raised with message containing "TabFact+ is not supported".
-- **TabFact+ rejection (case-insensitive):** Parse a config with `CONFIG_DATASET_CUSTOM_PATH="/some/path/tabfact_data.jsonl"` → assert same error.
-- **Non-TabFact custom path accepted:** Parse a config with `CONFIG_DATASET_CUSTOM_PATH="dataset/WikiTQ-4k/valid.jsonl"` → no error raised.
+- **TabFact+ rejection:** Parse a config with `CONFIG_INFERENCE_DATASET_PATH="dataset/TabFact+/large_tabfact_test_data_str.jsonl"` → assert `ValueError` is raised with message containing "TabFact+ is not supported".
+- **TabFact+ rejection (case-insensitive):** Parse a config with `CONFIG_TRAIN_DATASET_PATH="/some/path/tabfact_data.jsonl"` → assert same error.
+- **Non-TabFact path accepted:** Parse a config with `CONFIG_INFERENCE_DATASET_PATH="dataset/WikiTQ-4k/test.jsonl"` → no error raised.
+- **All vendored prompt paths resolve under `PROJECT_DIR`:** Each of the following resolves under `<PROJECT_DIR>/prompt/`, not under `CONFIG_PERSISTENT_ROOT` or the upstream AixelAsk repo root:
+  - `CONFIG_FINAL_REASONING_PROMPT="prompt/final_reasoning_DAG.md"` → `<PROJECT_DIR>/prompt/final_reasoning_DAG.md`
+  - `CONFIG_NOPLAN_REASONING_PROMPT="prompt/noplan_reasoning.md"` → `<PROJECT_DIR>/prompt/noplan_reasoning.md`
+  - `CONFIG_ROW_PROMPT="prompt/get_row_template.md"` → `<PROJECT_DIR>/prompt/get_row_template.md`
+  - `CONFIG_COL_PROMPT="prompt/get_col_template.md"` → `<PROJECT_DIR>/prompt/get_col_template.md`
+  - `CONFIG_SCHEMA_LINKING_PROMPT="prompt/prompt_schema_linking.md"` → `<PROJECT_DIR>/prompt/prompt_schema_linking.md`
+- **Few-shot files resolve under `PROJECT_DIR`:** All files from `CONFIG_FEWSHOT_VARIANT` resolve under `<PROJECT_DIR>/prompt/fewshot/`. Assert all 3 files (standard) or all 4 files (extended) exist after resolution.
+- **Negative test — prompts do NOT resolve under AixelAsk repo root:** Assert that `CONFIG_FINAL_REASONING_PROMPT="prompt/final_reasoning_DAG.md"` does NOT resolve to `/workspace/AixelAsk/AixelAsk/prompt/final_reasoning_DAG.md`.
+- **Negative test — output-root redirection does NOT move prompts:** Set `CONFIG_PERSISTENT_ROOT="/workspace/custom_output"` → assert prompt paths still resolve under `<PROJECT_DIR>/prompt/`, NOT under `/workspace/custom_output/prompt/`.
+- **Dataset paths resolve under AixelAsk root:** `CONFIG_INFERENCE_DATASET_PATH="dataset/WikiTQ-4k/test.jsonl"` resolves to `/workspace/AixelAsk/AixelAsk/dataset/WikiTQ-4k/test.jsonl`.
+- **Scalability rejected in seeded-ratio mode:** `CONFIG_DATASET=DATASET_SCALABILITY` with `CONFIG_SPLIT_MODE=SPLIT_MODE_SEEDED_RATIO` → assert `ValueError` about multi-file dataset.
+- **Overfit-PoC rejected for GRPO training:** `CONFIG_TRAINING_MODE=TRAINING_MODE_GRPO` with `CONFIG_SPLIT_MODE=SPLIT_MODE_OVERFIT_POC` → assert `ValueError` with message containing `"TRAINING_MODE_OVERFIT_POC"`.
+- **Overfit-PoC rejected for inference:** `CONFIG_ENABLE_TRAINING=n` with `CONFIG_SPLIT_MODE=SPLIT_MODE_OVERFIT_POC` → assert `ValueError` with message containing `"For inference, use SPLIT_MODE_SEEDED_RATIO or SPLIT_MODE_EXPLICIT_INDICES"`.
+- **Overfit-PoC accepted for overfit training:** `CONFIG_TRAINING_MODE=TRAINING_MODE_OVERFIT_POC` with `CONFIG_SPLIT_MODE=SPLIT_MODE_OVERFIT_POC` → no error raised.
 - **Fewshot variant default:** Parse a config without `CONFIG_FEWSHOT_VARIANT` → assert resolved variant is `"all3"` and resolved file list has exactly 3 files: `fewshot_parallel.txt`, `fewshot_sequential.txt`, `fewshot_hybrid.txt` (in that order).
 - **Fewshot variant parallel+hybrid extended:** Parse a config with `CONFIG_FEWSHOT_VARIANT=FEWSHOT_PARALLEL_HYBRID_EXTENDED` → assert resolved variant is `"parallel_hybrid_extended"` and resolved file list has exactly 4 files: `fewshot_parallel.txt`, `fewshot_hybrid.txt`, `fewshot_parallel_extended.txt`, `fewshot_hybrid_extended.txt` (in that order).
 - **Fewshot file existence check:** At startup, if any resolved fewshot file path does not exist on disk, `config.py` raises a clear error listing the missing file(s). Test by setting `CONFIG_FEWSHOT_VARIANT=FEWSHOT_PARALLEL_HYBRID_EXTENDED` with one extended file deleted → assert `FileNotFoundError` (or `ValueError`) naming the missing path.
+- **Split mode default:** Parse a config without `CONFIG_SPLIT_MODE` → assert resolved mode is `"seeded_ratio"`.
+- **Split mode explicit_indices:** Parse a config with `CONFIG_SPLIT_MODE=SPLIT_MODE_EXPLICIT_INDICES` → assert mode is `"explicit_indices"`.
+- **Split index parsing — basic:** `CONFIG_SPLIT_TRAIN_WIKITQ_4K_INDICES="0,5,10"` → assert parsed as `[0, 5, 10]`.
+- **Split index parsing — whitespace:** `CONFIG_SPLIT_TRAIN_WIKITQ_4K_INDICES=" 0 , 5 , 10 "` → assert parsed as `[0, 5, 10]`.
+- **Split index parsing — empty tokens ignored:** `CONFIG_SPLIT_TRAIN_WIKITQ_4K_INDICES="0,,5,10,"` → assert parsed as `[0, 5, 10]`.
+- **Split index parsing — deduplication:** `CONFIG_SPLIT_TRAIN_WIKITQ_4K_INDICES="5,0,5,10,0"` → assert parsed as `[0, 5, 10]` (deduped + sorted).
+- **Split index parsing — non-integer token failure:** `CONFIG_SPLIT_TRAIN_WIKITQ_4K_INDICES="0,abc,5"` → assert `ValueError` with message containing `"abc"` and `CONFIG_SPLIT_TRAIN_WIKITQ_4K_INDICES`.
+- **Split index parsing — empty string:** `CONFIG_SPLIT_TRAIN_WIKITQ_4K_INDICES=""` → assert parsed as `[]` (empty list).
+- **Split index out-of-range failure:** Set `CONFIG_SPLIT_TRAIN_WIKITQ_4K_INDICES="0,99999"` with `SPLIT_MODE_EXPLICIT_INDICES` → assert `ValueError` mentioning out-of-range index and dataset.
+- **Split overlap detection:** Set `CONFIG_SPLIT_TRAIN_WIKITQ_4K_INDICES="0,1,2"` and `CONFIG_SPLIT_TEST_WIKITQ_4K_INDICES="2,3,4"` with `SPLIT_MODE_EXPLICIT_INDICES` → assert `ValueError` listing `(wikitq_4k, 2)` as overlapping.
+- **Split overlap — different datasets allowed:** `CONFIG_SPLIT_TRAIN_WIKITQ_4K_INDICES="0"` and `CONFIG_SPLIT_TEST_WIKITQ_PLUS_INDICES="0"` → no error (different datasets, same index is fine).
+- **Empty test split failure for inference:** `CONFIG_ENABLE_TRAINING=n`, `SPLIT_MODE_EXPLICIT_INDICES`, all test index lists empty → assert `ValueError` about empty test split.
+- **Empty train split failure for training:** `CONFIG_ENABLE_TRAINING=y`, `SPLIT_MODE_EXPLICIT_INDICES`, all train index lists empty → assert `ValueError` about empty train split.
+- **Seeded split mode ignores index lists:** `SPLIT_MODE_SEEDED_RATIO` with non-empty index lists → no error (lists parsed for syntax but not used).
+- **Test-trained checkpoint source default:** Parse a config without `CONFIG_TEST_TRAINED_CHECKPOINT_SOURCE` → assert resolved source is `"best"`.
+- **Test-trained checkpoint source explicit:** Parse a config with `CONFIG_TEST_TRAINED_CHECKPOINT_SOURCE=TEST_TRAINED_CHECKPOINT_LATEST` → assert source is `"latest"`.
+- **Test-trained checkpoint path parsed:** Parse a config with `CONFIG_TEST_TRAINED_CHECKPOINT_PATH="/some/custom/path"` → assert path is stored correctly.
+- **Test-trained output path derivation:** Parse a config with `CONFIG_TRAIN_OUTPUT_DIR="output/train_grpo"` and `CONFIG_TEST_TRAINED_CHECKPOINT_SOURCE=TEST_TRAINED_CHECKPOINT_BEST`, `CONFIG_TEST_TRAINED_OUTPUT_DIR=""` → assert derived output dir is `output/train_grpo/test_best/`.
+- **Test-trained result file derivation:** Same config → assert derived result file is `output/train_grpo/test_best/results.jsonl`.
+- **Test-trained dag stats derivation:** Same config → assert derived DAG stats file is `output/train_grpo/test_best/dag_stats.json`.
+- **Test-trained explicit output dir overrides derivation:** Parse a config with `CONFIG_TEST_TRAINED_OUTPUT_DIR="output/custom_test/"` → assert that value is used instead of derivation.
+
+**`tests/test_split_utils.py`:**
+
+Tests split construction logic across all three modes (no GPU required).
+
+- **Seeded ratio mode — deterministic split:** Load a 100-example mock dataset, seed=42, ratio=0.8 → assert train has 80 examples, valid has 20. Re-run with same seed → same partition.
+- **Seeded ratio mode — different seed:** Seed=99 → different partition from seed=42.
+- **Seeded ratio mode — source metadata:** Assert every example in the split has `source_dataset` derived from dataset choice and `source_index` matching its line number.
+- **Explicit indices mode — single dataset:** `wikitq_4k` train indices `[0,1,2]`, valid `[3,4]`, test `[5,6,7]` → assert splits have correct sizes and correct `source_dataset`/`source_index`.
+- **Explicit indices mode — multi-dataset union:** train from `wikitq_4k` `[0,1]` + `wikitq_plus` `[0,1]` → assert train has 4 examples with correct metadata.
+- **Explicit indices mode — empty dataset contribution:** `wikitq_4k` train `[0,1]`, `wikitq_plus` train `""` → assert train has 2 examples, all from `wikitq_4k`.
+- **Explicit indices mode — overlap detection:** Construct splits with `(wikitq_4k, 5)` in both train and test → assert `ValueError`.
+- **Explicit indices mode — overlap across three splits:** `(wikitq_4k, 5)` in train and valid → assert `ValueError`.
+- **Explicit indices mode — no overlap across different datasets:** `(wikitq_4k, 0)` in train, `(wikitq_plus, 0)` in test → no error.
+- **Explicit indices mode — sorted output:** Indices `[10,5,0]` → assert resulting split entries are sorted by `source_index`: `[0, 5, 10]`.
+- **Explicit indices mode — Scalability cross-file indexing:** Index spanning across Scalability sub-files resolves to correct sub-file and line → verify via `dataset_registry` offset table.
+- **Explicit indices mode — preservation through rl_dataset:** Build a split with known metadata, format through `rl_dataset.py` → assert `source_dataset` and `source_index` are preserved in the formatted prompts.
+- **Overfit PoC mode — unchanged behavior:** `SPLIT_MODE_OVERFIT_POC`, `FIRST_N`, N=8 → assert same indices as before.
+- **Baselines use only test split:** Construct explicit splits, mock `pipeline.run()` → assert pipeline only processes test split examples and never touches train/valid.
+- **Empty validation split — training with warning:** Explicit mode with empty valid indices → training runs but logs warning about no periodic evaluation.
+- **Empty validation split — no best checkpoint:** When validation is empty, `CONFIG_TRAIN_SAVE_BEST_BY` is effectively disabled; only `latest` checkpoints are saved. Assert no `best/` checkpoint directory is created.
+- **Empty validation split — no eval JSONL records:** When validation is empty, assert per-eval JSONL file remains empty (no lines written).
+- **Validation data not used for optimizer updates:** Mock GRPO loop with train + validation splits; assert that prompts sampled for `loss.backward()` / optimizer steps come only from train split (never from validation).
+- **Validation data not in final evaluation:** Construct explicit splits with known train/valid/test examples; run `pipeline.run()` (inference) → assert only test-split examples appear in result JSONL; no validation examples present.
+- **SplitResult dataclass correctness:** Assert `SplitResult.mode`, `.train`, `.valid`, `.test` are all populated correctly.
+
+**`tests/test_dataset_registry.py`:**
+
+Tests canonical dataset loading and path resolution (no GPU required, reads real JSONL files on disk).
+
+- **Registry contains all supported datasets:** Assert keys `"wikitq_4k"`, `"wikitq_plus"`, `"scalability"` exist.
+- **Registry does NOT contain TabFact+:** Assert no key contains `"tabfact"`.
+- **WikiTQ-4k path resolution:** `get_canonical_path("wikitq_4k", "train")` → resolves to an existing file.
+- **WikiTQ+ path resolution:** `get_canonical_path("wikitq_plus", "test")` → resolves to an existing file.
+- **Scalability path resolution:** `get_canonical_path("scalability", "all")` → resolves to 6 existing files.
+- **count_examples accuracy:** `count_examples("wikitq_4k", "train")` → matches actual line count of `dataset/WikiTQ-4k/train.jsonl`.
+- **load_examples correctness:** `load_examples("wikitq_4k", "train", [0, 1])` → returns 2 entries with correct `source_dataset="wikitq_4k"` and `source_index` values.
+- **load_examples out-of-range:** `load_examples("wikitq_4k", "train", [99999])` → raises `ValueError`.
+- **Scalability concatenation order:** Index 0 from Scalability → assert it matches line 0 of `0-1k.jsonl`.
+- **Scalability cross-file boundary:** Index at boundary between `0-1k.jsonl` and `1k-2k.jsonl` → assert correct example from `1k-2k.jsonl`.
+
+**`tests/test_checkpoint_resolver.py`:**
+
+Tests checkpoint resolution for post-training test evaluation (no GPU required; uses mock filesystem).
+
+- **Resolve best checkpoint:** Create a mock `checkpoints/best/` directory with an `adapter_config.json` → assert `resolve_test_checkpoint` returns `source="best"` and the correct path.
+- **Resolve latest checkpoint:** Create mock `checkpoints/latest/` → assert `source="latest"` and correct path.
+- **Resolve merged checkpoint:** Create mock `checkpoints/merged/` with `config.json` → assert `source="merged"` and correct path.
+- **Resolve explicit path:** Set `CONFIG_TEST_TRAINED_CHECKPOINT_PATH="/some/path"`, create the directory → assert `source="explicit_path"` and correct path.
+- **Best checkpoint missing:** No `checkpoints/best/` directory → assert `FileNotFoundError` with message containing "Best checkpoint not found" and "evaluation step".
+- **Latest checkpoint missing:** No `checkpoints/latest/` → assert `FileNotFoundError` with "Latest checkpoint not found".
+- **Merged checkpoint missing:** No `checkpoints/merged/` → assert `FileNotFoundError` with "CONFIG_TRAIN_SAVE_MERGED_ADAPTER" hint.
+- **Explicit path missing:** `CONFIG_TEST_TRAINED_CHECKPOINT_PATH` points to non-existent directory → assert `FileNotFoundError` with the path in the message.
+- **Override via --checkpoint flag:** Config has `TEST_TRAINED_CHECKPOINT_BEST`, but `override_source="latest"` → assert resolution uses latest, not best.
+- **Metadata extraction:** Create a `checkpoint_metadata.json` with `{"step": 375, "metric_name": "eval_reward_mean", "metric_value": 0.68}` in `checkpoints/best/` → assert `resolved.step == 375`, `resolved.metric_name == "eval_reward_mean"`, `resolved.metric_value == 0.68`.
+- **Missing metadata gracefully handled:** No `checkpoint_metadata.json` → assert `resolved.step is None`, `resolved.metric_name is None`, `resolved.metric_value is None` (no error).
+- **Adapter-only checkpoint detected:** Create mock `checkpoints/best/` with `adapter_config.json` + `adapter_model.safetensors` but **no** `config.json` / `model*.safetensors` → assert `resolved.is_adapter_only == True`.
+- **Merged checkpoint detected:** Create mock `checkpoints/merged/` with `config.json` + `model.safetensors` → assert `resolved.is_adapter_only == False`.
+- **Adapter merge-and-cleanup flow (mock):** Resolve an adapter-only checkpoint → assert `is_adapter_only == True`. Mock `lora_factory.merge_and_export()` to create a temp dir with expected files. Simulate the merge step from `test_main.py` step 2a → assert the temp dir exists and `resolved_checkpoint.path` is updated. Trigger atexit cleanup → assert the temp dir is removed.
+
+**`tests/test_checkpointing.py`:**
+
+Tests project-specific checkpoint metadata, symlinks, index, and merged export (no GPU required; uses mock filesystem). Trainer-native save/load is not tested here — it is TRL/Accelerate's responsibility.
+
+- **Latest symlink updated by MetadataCallback:** Simulate Trainer save event for step 50, then step 100 → assert `latest` symlink points to `checkpoint-100/`.
+- **Best checkpoint updated on metric improvement:** Simulate eval events with `metric_value=0.5`, then `0.7` → assert `best/` contains the step with `0.7`. Event with `0.6` → assert `best/` still has `0.7`.
+- **Best checkpoint disabled when validation empty:** Config with empty validation split → simulate save events → assert no `best/` directory created.
+- **Final checkpoint saved by MetadataCallback.on_train_end:** Simulate train_end → assert `final/` directory created.
+- **checkpoint_index.json updated correctly:** Save steps 50 and 100 → assert `checkpoint_index.json` lists both with correct timestamps and `latest` field.
+- **checkpoint_metadata.json written per save:** Simulate save → assert `checkpoint_metadata.json` in checkpoint dir with correct `step`, `timestamp`, `save_reason`.
+- **config_snapshot.json written per save:** Assert Kconfig symbols snapshot saved in checkpoint dir.
+- **Config compatibility — fatal mismatch blocks resume:** `config_snapshot.json` has `LORA_R=16`, current config has `32` → assert `ValueError`.
+- **Config compatibility — warning on non-fatal mismatch:** Eval cadence changed → assert warning logged but no error.
+- **Merged export:** Call merged export function → assert `merged/` directory with `config.json` + `model*.safetensors`, no `optimizer.pt`.
+- **Stats JSONL append-on-resume:** Write 5 step entries, simulate resume, write 5 more → assert JSONL has 10 lines total.
+- **Curves TSV append-on-resume:** Write TSV for steps 1–5, resume at 5, write 6–10 → assert 10 data rows.
 
 **`tests/test_sglang_client.py`:**
 - Mock the OpenAI client. Verify `chat()` builds the correct messages format.
@@ -1520,7 +2057,7 @@ Static checks (no GPU required) that verify the project `README.md` is a concret
 
 **`tests/test_dag_stats.py`:**
 
-Tests DAG metric computation on small synthetic DAGs (no LLM or GPU required).
+Tests DAG metric computation on small synthetic DAGs (no LLM or GPU required). All synthetic DAG fixtures must use the canonical schema: `NodeID` (int, no space), `Action` in `{"Retrieval", "Reasoning"}`, `Next` as `list[int]`.
 
 - **Metric computation on a linear DAG** (A → B → C):
   - `num_nodes=3`, `num_edges=2`, `dag_depth=3` (longest path in nodes), `num_roots=1`, `num_leaves=1`, `max_width=1`, `avg_out_degree=2/3`.
@@ -1574,7 +2111,7 @@ Tests DAG metric computation on small synthetic DAGs (no LLM or GPU required).
 
 **`tests/test_dag_executor.py`:**
 
-Tests topo-level scheduling, batching, and concurrency on synthetic DAGs with mocked LLM/embedding clients (no GPU required).
+Tests topo-level scheduling, batching, and concurrency on synthetic DAGs with mocked LLM/embedding clients (no GPU required). All synthetic DAG fixtures must use the canonical schema: `NodeID` (int), `Action` in `{"Retrieval", "Reasoning"}`, `Next` as `list[int]`.
 
 - **Topo-level scheduling correctness (parallel DAG):**
   - DAG: A→C, B→C (two roots, one leaf). Mock retrieval for A and B, mock reasoning for C.
@@ -1606,6 +2143,19 @@ Tests topo-level scheduling, batching, and concurrency on synthetic DAGs with mo
   - Mock `request_gpt_chat` to capture `ctx_stage.get()` and `ctx_node_id.get()` on each call.
   - Execute a 2-node DAG. Assert: each call saw the correct stage and node ID.
 
+**`tests/test_call_recorder.py`:**
+
+Tests the thread-safe LLM call accumulator (no GPU required).
+
+- **Record and retrieve:** Call `record(...)` with stage `"dag_generation"`, item index 0 → assert `get_calls_for_item(0)` returns 1 record with correct fields.
+- **call_id uniqueness:** Call `record(...)` twice → assert the two returned `call_id` values are different.
+- **update() annotates existing record:** Call `record(...)` → get `call_id` → call `update(call_id, error="validation failed", error_category="json_parse_error")` → assert the record now has `error` and `error_category` set.
+- **update() on invalid call_id:** Call `update("nonexistent_id", error="x")` → assert `KeyError` or graceful no-op (choose one and document).
+- **Thread safety:** Spawn 10 threads each calling `record(...)` concurrently with different item indices → assert `get_calls_for_item()` returns the correct count per item and no data corruption.
+- **flush_for_item() clears records:** Record 3 calls for item 0 and 2 for item 1. Call `flush_for_item(0)` → assert `get_calls_for_item(0)` returns empty, `get_calls_for_item(1)` still returns 2.
+- **Truncation:** Set `CONFIG_LOG_LLM_CALLS_MAX_CHARS=50`, record a call with a 200-char prompt → assert stored prompt is 50 chars + `"...<truncated>"` suffix.
+- **Item tagging via contextvars:** Set `ctx_item_index` to 5, call `record(...)` without passing item_index explicitly → assert the record is tagged with item 5.
+
 **`tests/test_reward.py`:**
 
 Tests weighted reward computation (no GPU required).
@@ -1622,7 +2172,7 @@ Tests weighted reward computation (no GPU required).
 
 **`tests/test_dag_reward_parser.py`:**
 
-Tests DAG output parsing for reward computation (no GPU required).
+Tests DAG output parsing for reward computation (no GPU required). All test DAG fixtures must use the canonical schema: `NodeID` (int), `Action` in `{"Retrieval", "Reasoning"}`, `Next` as `list[int]`.
 
 - **Valid DAG parses correctly:** Standard DAG JSON array → `valid=True`, depth computed correctly, answer extracted.
 - **Cycle detected:** DAG with A→B→A → `valid=False`, `error_category="cycle_detected"`.
@@ -1647,6 +2197,11 @@ Tests training config parsing (no GPU required).
 - **LoRA target modules parsed:** `"q_proj,k_proj,v_proj"` → assert list of 3 strings.
 - **defconfig.train_grpo produces valid config:** Parse the shipped defconfig → no errors.
 - **defconfig.train_overfit_poc produces valid config:** Parse the shipped defconfig → no errors.
+- **Split mode in train config:** `CONFIG_SPLIT_MODE=SPLIT_MODE_EXPLICIT_INDICES` → assert `train_config.split_mode == "explicit_indices"`.
+- **Split mode forced for overfit:** `CONFIG_TRAINING_MODE=TRAINING_MODE_OVERFIT_POC`, `CONFIG_SPLIT_MODE=SPLIT_MODE_EXPLICIT_INDICES` → assert split mode is forced to `"overfit_poc"` (with warning logged).
+- **Split indices in train config:** `CONFIG_SPLIT_TRAIN_WIKITQ_4K_INDICES="0,1,2"` → assert `train_config.split_train_indices["wikitq_4k"] == [0, 1, 2]`.
+- **Test-trained checkpoint source in train config:** `CONFIG_TEST_TRAINED_CHECKPOINT_SOURCE=TEST_TRAINED_CHECKPOINT_LATEST` → assert `train_config.test_trained_checkpoint_source == "latest"`.
+- **Test-trained output dir derivation in train config:** `CONFIG_TRAIN_OUTPUT_DIR="output/train_grpo"`, default source `best`, empty `CONFIG_TEST_TRAINED_OUTPUT_DIR` → assert derived path ends with `test_best/`.
 
 **`tests/test_train_stats.py`:**
 
@@ -1685,18 +2240,26 @@ Tests seeded tiny-subset selection (no GPU required).
 
 **`tests/test_grpo_smoke.py`:**
 
-Smoke test for GRPO training loop (mocked model, no GPU required).
+Smoke test for TRL GRPOTrainer integration (mocked model, no GPU required).
 
-- **1-step GRPO runs:** Mock model with fixed outputs, mock reward → assert 1 optimizer step completes without error.
-- **Grouped rewards computed:** 4 prompts × 2 completions → assert advantage computation produces correct shape and values.
-- **Stats produced:** After 2 steps → assert per-step JSONL has 2 lines with expected GRPO fields (`reward_mean`, `validity_rate`, etc.).
-- **Curves artifacts produced:** After 2 steps with `update_every=1` → assert TSV and TeX files exist.
-- **Checkpoint produced:** After 2 steps with `save_every=1` → assert checkpoint directory exists.
+- **1-step GRPO runs:** Create `GRPOTrainer` with a mock model and the project's `reward_func` → assert `trainer.train()` completes 1 step without error.
+- **Reward function interface:** Assert `reward_func` signature matches TRL's expected `reward_funcs` interface: accepts `(completions: list[str], prompts: list[str], ...)` and returns `list[float]`.
+- **Stats callback fires:** After 2 steps → assert `StatsCallback` wrote per-step JSONL with expected GRPO fields (`reward_mean`, `validity_rate`, etc.).
+- **Curves callback fires:** After 2 steps with `update_every=1` → assert `CurvesCallback` wrote TSV and TeX files.
+- **Checkpoint produced:** After 2 steps with `save_every=1` → assert Trainer-native checkpoint directory exists.
+- **Metadata callback fires:** Assert `checkpoint_metadata.json` and `checkpoint_index.json` exist after checkpoint save.
 - **Eval triggered:** With `eval_every=1` → assert per-eval JSONL has entries.
 
 ### 9. Expected Workflow (Copy-Pasteable Commands)
 
 ```bash
+# 0. (Runpod) Verify storage layout
+df -h /workspace /tmp
+#   /workspace = Volume disk (persistent), /tmp = Container disk (ephemeral)
+#   Recommended: Volume ≥ 150 GB, Container ≥ 60 GB
+#   All persistent artifacts (models, outputs, checkpoints) go under /workspace
+#   Container disk (/tmp, /root) is ephemeral — lost on Pod stop
+
 # 1. Enter the module directory
 cd /workspace/AixelAsk/nlp_project
 
@@ -1708,41 +2271,74 @@ pip check
 # 3. Generate default .config
 make defconfig
 
+# 3a. Verify resolved persistent paths (all should be under /workspace)
+make show-paths
+#   → Loads .config, resolves all paths via src.config, and prints them
+#   → MODEL_CACHE_DIR (HF_HOME): should be /workspace/...
+#   → HUB_CACHE (actual model storage, $HF_HOME/hub/): should be /workspace/...
+#   → EMBEDDING_CACHE (persistent embedding cache): should be /workspace/...
+#   → RESULT_FILE, TRAIN_OUTPUT_DIR, TRAIN_CURVES_DIR: should be /workspace/...
+#   → EPHEMERAL_TMPDIR: should be /tmp (Container disk scratch)
+#   → HF_HOME / TRANSFORMERS_CACHE (set by config.py): should match MODEL_CACHE_DIR
+#   → If any persistent path does NOT start with /workspace/, reconfigure
+#     the corresponding symbol in menuconfig or the defconfig
+
 # 4. (Optional) Customize configuration
 make menuconfig
 #   → Requires kconfiglib (installed in step 2). Opens TUI via tools/menuconfig.py.
-#   → Adjust model paths, ports, dataset, workers, DAG stats, etc.
+#   → Adjust model paths, ports, dataset, split mode, workers, DAG stats, etc.
 #   → Save and exit. Writes .config
+
+# 4a. (Optional) Configure explicit per-dataset splits
+#   In menuconfig → Split menu:
+#     Split mode → SPLIT_MODE_EXPLICIT_INDICES
+#     CONFIG_SPLIT_TRAIN_WIKITQ_4K_INDICES = "0,1,2,3,4,5,6,7,8,9"
+#     CONFIG_SPLIT_VALID_WIKITQ_PLUS_INDICES = "0,1,2,3,4"
+#     CONFIG_SPLIT_TEST_SCALABILITY_INDICES = "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14"
+#   Or edit .config directly:
+#     CONFIG_SPLIT_MODE=SPLIT_MODE_EXPLICIT_INDICES
+#     CONFIG_SPLIT_TRAIN_WIKITQ_4K_INDICES="0,1,2,3,4,5,6,7,8,9"
+#     CONFIG_SPLIT_VALID_WIKITQ_PLUS_INDICES="0,1,2,3,4"
+#     CONFIG_SPLIT_TEST_SCALABILITY_INDICES="0,1,2,3,4,5,6,7,8,9,10,11,12,13,14"
+#   Indices are zero-based, comma-separated, into the canonical JSONL files.
+#   The test split is the ONLY data evaluated by make run / make run-baseline.
 
 # 5. (Optional) Pre-download models (no server started)
 make download
 #   → Calls huggingface_hub.snapshot_download for both models
-#   → Caches to CONFIG_MODEL_CACHE_DIR
+#   → Downloads to $HF_HOME/hub/ (HF_HOME = CONFIG_MODEL_CACHE_DIR,
+#     default: /workspace/.cache/huggingface/hub/, on Volume disk)
+#   → Only needs to run once per Volume — models survive Pod restarts
 
-# 6. Run the full pipeline (standard mode)
+# 6. Run the full pipeline (standard mode) — TEST SPLIT ONLY
 make run
+#   → Resolves the test split (explicit indices or seeded split, depending on CONFIG_SPLIT_MODE)
 #   → Starts SGLang server (Mistral-7B-Instruct-v0.3)
 #   → Loads nomic-embed-text-v1 on GPU
-#   → Computes table embeddings → cache/table_embeddings.jsonl
-#   → Runs DAG reasoning → output/results.jsonl
+#   → Computes table embeddings for test examples → persistent embedding cache
+#   → Runs DAG reasoning on TEST SPLIT ONLY → output/results.jsonl
+#   → Train and validation examples are NEVER processed
 #   → Collects DAG statistics → output/dag_stats.json (if enabled)
 #   → Prints accuracy + DAG stats summary
 #   → Stops SGLang server
 
-# 7. (Optional) Run the min-depth baseline
+# 7. (Optional) Run the min-depth baseline — TEST SPLIT ONLY
 make run-baseline
-#   → Copies defconfig.min_depth to .config (sets DAG_PROMPT_MIN_DEPTH_BASELINE)
-#   → Same pipeline as above, but DAG generation uses prompt/get_dag_min_depth.md
-#   → Results written to output/results_min_depth.jsonl (separate from standard)
-#   → DAG stats written to output/dag_stats_min_depth.json
+#   → Preserves the current .config (dataset, split, test configuration unchanged)
+#   → Overrides: DAG_PROMPT_VARIANT=min_depth_baseline + separate output paths
+#   → Same test-split-only pipeline as above, but with min-depth prompt
+#   → Results → output/results_min_depth.jsonl (separate from standard)
+#   → DAG stats → output/dag_stats_min_depth.json
 #   Alternatively: make menuconfig → Retrieval menu → DAG prompt variant →
 #   select "min_depth_baseline" → Save → make run
 
-# 8. (Optional) Run the few-shot parallel+hybrid extended baseline
+# 8. (Optional) Run the few-shot parallel+hybrid extended baseline — TEST SPLIT ONLY
 make run-baseline-fewshot-ph-ext
-#   → Copies defconfig.fewshot_parallel_hybrid_ext to .config
-#   → Standard prompt template (get_dag.md), but {fewshot} uses only
+#   → Preserves the current .config (dataset, split, test configuration unchanged)
+#   → Overrides: FEWSHOT_VARIANT=parallel_hybrid_extended + separate output paths
+#   → Standard prompt template (get_dag.md), but {{ fewshot }} uses only
 #     parallel + hybrid + parallel_extended + hybrid_extended examples (no sequential)
+#   → ONLY the configured test split is evaluated
 #   → Results → output/results_fewshot_ph_ext.jsonl
 #   → DAG stats → output/dag_stats_fewshot_ph_ext.json
 #   Alternatively: make menuconfig → Retrieval menu → Few-shot variant →
@@ -1798,8 +2394,24 @@ make train-grpo
 # 16. Resume interrupted training
 make resume-train
 #   → Loads .config (must still be set from previous make train-*)
-#   → Auto-detects latest checkpoint in CONFIG_TRAIN_OUTPUT_DIR
-#   → Resumes from that checkpoint, appends to existing JSONL stats
+#   → Reads checkpoint_index.json, finds latest valid checkpoint
+#   → Validates config compatibility (base model, LoRA rank, etc.)
+#   → Restores: adapter weights, optimizer, scheduler, RNG states, step counter
+#   → Appends new entries to existing JSONL stats and TSV curves
+#   → Resumes GRPO loop from global_step + 1
+
+# 16a. (Alternative) Resume from a specific checkpoint
+#   Edit .config: CONFIG_TRAIN_LOAD_FROM_CHECKPOINT=y
+#                 CONFIG_TRAIN_CHECKPOINT_PATH="output/train_grpo/checkpoints/step-000050/"
+#   make resume-train
+
+# 16b. Inspect checkpoint state
+ls output/train_grpo/checkpoints/
+#   → step-000050/ step-000100/ latest -> step-000100  best/
+python3 -m json.tool output/train_grpo/checkpoints/checkpoint_index.json
+#   → Lists all checkpoints with step, timestamp, save_reason, metric
+python3 -m json.tool output/train_grpo/checkpoints/step-000100/training_state.json
+#   → global_step, epoch, tokens_seen, best_metric_value
 
 # 17. Manually compile learning curves
 make compile-curves
@@ -1812,10 +2424,24 @@ tail -1 output/train_grpo/train_evals.jsonl | python3 -m json.tool
 cat output/train_grpo/resolved_seeds.json
 cat output/train_grpo/reward_config.json
 
-# 19. Use the fine-tuned model for inference
-#   After training, point CONFIG_INFERENCE_MODEL to the merged checkpoint:
-#   make menuconfig → Model menu → set inference model path to
+# 19. Evaluate the trained model on the TEST SPLIT
+make test-trained-best
+#   → Resolves best checkpoint from output/train_grpo/checkpoints/best/
+#   → Starts SGLang server with the trained model
+#   → Evaluates ONLY the configured test split
+#   → Results → output/train_grpo/test_best/results.jsonl
+#   → DAG stats → output/train_grpo/test_best/dag_stats.json
+#   → Summary → output/train_grpo/test_best/test_eval_summary.json
+
+# 19a. (Alternative) Evaluate the latest checkpoint
+make test-trained-latest
+#   → Same flow but uses output/train_grpo/checkpoints/latest/
+#   → Results → output/train_grpo/test_latest/results.jsonl
+
+# 19b. (Advanced/manual) Use a trained checkpoint with standard pipeline
+#   make menuconfig → Model menu → set CONFIG_INFERENCE_MODEL to
 #   output/train_grpo/checkpoints/merged/ → Save → make run
+#   (This bypasses the dedicated test-trained flow — supported but not recommended)
 
 # 20. Show current training config
 make show-train-config
@@ -1842,28 +2468,34 @@ make show-train-config
 | DAG parallel executor | **New** | `src/dag_executor.py` (frontier-based topo-level scheduling with batched retrieval + concurrent reasoning) |
 | DAG execution patch | **New** | `src/patch_dag_execution.py` (replaces upstream sequential loop with `dag_executor`) |
 | Per-item context | **New** | `src/item_context.py` (`contextvars` for correct logging under within-item concurrency) |
+| LLM call recorder | **New** | `src/call_recorder.py` (thread-safe per-item LLM call accumulator with `record()`, `update()`, `flush_for_item()`) |
 | Model downloader | **New** | `src/download_models.py` (HF `snapshot_download`, no server needed) |
-| Kconfig files | **New** | 7 Kconfig files (added `Kconfig.dagstats`) |
+| Kconfig files | **New** | 8 Kconfig files (added `Kconfig.dagstats`, `Kconfig.test_trained`) |
+| Vendored prompt templates | **New** | `prompt/get_dag.md`, `prompt/get_dag_min_depth.md`, `prompt/final_reasoning_DAG.md`, `prompt/noplan_reasoning.md`, `prompt/get_row_template.md`, `prompt/get_col_template.md`, `prompt/prompt_schema_linking.md`, `prompt/fewshot/*` — self-contained copies of upstream prompts with question-type section removed |
 | Menuconfig wrapper | **New** | `tools/menuconfig.py` (kconfiglib-based, no system dependency) |
 | Makefile | **New** | Build/run orchestration |
 | Config parser | **New** | `src/config.py` |
 | Pipeline orchestrator | **New** | `src/pipeline.py` |
-| Entrypoint | **New** | `src/main.py` |
+| Inference/evaluation entrypoint | **New** | `src/main.py` |
 | Training entrypoint | **New** | `src/training/train_main.py` |
 | Training config | **New** | `src/training/train_config.py` |
 | RL dataset formatting | **New** | `src/training/rl_dataset.py` |
 | Weighted reward computation | **New** | `src/training/reward.py` |
 | DAG reward parser | **New** | `src/training/dag_reward_parser.py` (reuses upstream `validate_dag` for validity) |
-| GRPO training loop | **New** | `src/training/grpo_trainer.py` (manual implementation, no trl) |
-| LoRA/QLoRA model factory | **New** | `src/training/lora_factory.py` (uses `peft` + `bitsandbytes`) |
-| Batched generation | **New** | `src/training/generation.py` |
-| Training statistics | **New** | `src/training/train_stats.py` (append-only JSONL + summary) |
-| Checkpointing | **New** | `src/training/checkpointing.py` |
+| GRPO training wrapper | **New** | `src/training/grpo_trainer.py` (TRL `GRPOTrainer` wrapper + project reward function + `TrainerCallback` registration) |
+| LoRA/QLoRA model factory | **New** | `src/training/lora_factory.py` (uses `peft` + `bitsandbytes`; reference model managed by TRL) |
+| Training statistics callbacks | **New** | `src/training/train_stats.py` (`TrainerCallback` for project-specific JSONL + summary + curves TSV) |
+| Checkpoint metadata | **New** | `src/training/checkpointing.py` (project-specific metadata/symlinks/index; save/load delegated to Trainer) |
 | TeX learning curves | **New** | `src/training/curves.py` (TSV + PGFPlots TeX generation) |
 | TeX compilation | **New** | `src/training/tex_compile.py` (periodic pdflatex/latexmk) |
 | Overfit-PoC helpers | **New** | `src/training/tiny_overfit_poc.py` |
-| Train/dev split | **New** | `src/training/split_utils.py` |
+| Split construction (seeded/explicit/overfit) | **New** | `src/training/split_utils.py` |
+| Canonical dataset registry | **New** | `src/training/dataset_registry.py` |
+| Kconfig split menu | **New** | `Kconfig.split` (split mode, 9 per-dataset index-list symbols) |
 | Kconfig training menus | **New** | `Kconfig.training`, `Kconfig.training_stats` |
+| Kconfig test-trained menu | **New** | `Kconfig.test_trained` (checkpoint selection, test-eval output paths) |
+| Post-training test entrypoint | **New** | `src/training/test_main.py` (evaluate trained checkpoint on test split) |
+| Checkpoint resolver | **New** | `src/training/checkpoint_resolver.py` (resolve best/latest/merged/explicit checkpoint paths) |
 | Training defconfigs | **New** | `defconfig.train_grpo`, `defconfig.train_overfit_poc` |
 | Project README | **New** | `README.md` — implementation-written guide covering setup, config, inference, training, outputs, troubleshooting |
 
@@ -1881,7 +2513,7 @@ make show-train-config
 
 6. **DAG stats via wrapping, not instrumentation:** The DAG object is captured by wrapping `get_dag` (which returns the DAG list) rather than modifying `process_single_table` (which would require forking the reasoning scripts). Retry counts are captured by wrapping `validate_dag` with a `contextvars` counter (see `item_context.py`). This keeps all observation logic in `patch_dag.py` and `dag_stats.py`, fully decoupled from the upstream repo.
 
-7. **Download-only without server:** The `--download-only` path uses `huggingface_hub.snapshot_download` directly, avoiding the overhead and GPU requirement of starting SGLang just to cache weights. This makes CI/CD pre-warming and offline preparation simpler.
+7. **Download-only without server:** The `--download-only` path uses `huggingface_hub.snapshot_download` directly to populate the persistent HF model cache on Volume disk, avoiding the overhead and GPU requirement of starting SGLang just to download weights. This makes CI/CD pre-warming and offline preparation simpler.
 
 8. **Conservative dependency pins:** Upper bounds on `numpy`, `torch`, `transformers`, and `scipy` prevent silent breakage from C-API or sparse-matrix regressions. The `pip check` step in the workflow catches conflicts early. Pins should be revisited when upgrading SGLang.
 
@@ -1891,7 +2523,7 @@ make show-train-config
 
 11. **Two-level concurrency with global limiters:** Cross-item parallelism (`CONFIG_MAX_WORKERS` threads) and within-item parallelism (frontier-level `ThreadPoolExecutor`) can produce O(workers × frontier_width) concurrent calls. To prevent overwhelming the SGLang server or OOMing the embedding GPU, two shared semaphores cap global concurrency: `CONFIG_SGLANG_CLIENT_CONCURRENCY` for LLM HTTP requests and `CONFIG_GLOBAL_EMBEDDING_CONCURRENCY` for embedding batches. This design keeps concurrency high (maximizing SGLang continuous batching) while remaining bounded.
 
-12. **`contextvars` over `threading.local()` for logging:** Within-item concurrency means multiple DAG nodes from the same item may execute in different threads simultaneously. `threading.local()` cannot distinguish them. `contextvars` with `copy_context().run(...)` propagate the correct item/stage/node context into each submitted task, keeping the LLM call recorder's `llm_calls` entries correctly tagged without any upstream code changes.
+12. **`contextvars` over `threading.local()` for logging:** Within-item concurrency means multiple DAG nodes from the same item may execute in different threads simultaneously. `threading.local()` cannot distinguish them. `contextvars` require explicit propagation via `copy_context().run(...)` into each submitted thread-pool task, but once propagated they carry the correct item/stage/node context, keeping the LLM call recorder's `llm_calls` entries correctly tagged without any upstream code changes.
 
 13. **No question-type classifier; LLM self-selects DAG structure:** The paper describes a fine-tuned RoBERTa classifier that categorizes questions into parallel / sequential / hybrid before selecting a per-type prompt and few-shot set. The upstream repo does not include that classifier or its training code (the repo only supports looking up types from a pre-labeled file that is also not provided). Rather than reimplementing the classifier, this module removes the question-type concept entirely: the shipped DAG prompt (§4a) instructs the LLM to choose the structure itself, and **all** few-shot examples (parallel + sequential + hybrid) are always included in the prompt. This eliminates the external dependency on a label file or classifier model, simplifies the pipeline, and lets the LLM reason about structure from the question directly.
 
@@ -1899,7 +2531,7 @@ make show-train-config
 
 15. **Overfit-PoC before full training:** A dedicated overfit-PoC mode (`CONFIG_TRAINING_MODE=TRAINING_MODE_OVERFIT_POC`) validates the entire training stack end-to-end on a tiny seeded subset (e.g. 16 examples) before committing to large-scale runs. This catches bugs in reward computation, data formatting, gradient flow, checkpoint saving, and curve generation early.
 
-16. **Manual GRPO implementation (no trl dependency):** The GRPO training loop is implemented from scratch in `grpo_trainer.py` rather than using Hugging Face `trl`. This avoids the large `trl` dependency tree, gives full control over grouped sampling, reward injection, advantage normalization, and per-step logging, and makes the training loop auditable and debuggable.
+16. **TRL GRPOTrainer over manual implementation:** The GRPO training loop is delegated to TRL's battle-tested `GRPOTrainer` rather than implemented from scratch. The project provides only the reward function (project-specific DAG parsing + weighted reward) and dataset; TRL handles grouped generation, advantage normalization, clipped surrogate loss, KL penalty, optimizer orchestration, and Trainer-native checkpointing. Project-specific outputs (JSONL stats, TeX curves, metadata manifests) are injected via `TrainerCallback` subclasses. This follows the library-first principle: GRPO is a well-solved problem, and reimplementing it offers no project-specific advantage over TRL's implementation.
 
 17. **TeX/PGFPlots learning curves (not matplotlib):** Training produces learning curve PDFs by maintaining `.tsv` data files and `.tex` PGFPlots source files that are compiled to PDF incrementally during training. This avoids a `matplotlib` dependency, produces publication-quality vector graphics, and keeps curve artifacts inspectable even on headless servers (just open the PDF). Compilation failures never crash training.
 
@@ -1907,17 +2539,35 @@ make show-train-config
 
 19. **Append-only JSONL stats for crash resilience:** Per-step and per-eval training metrics are written as append-only JSONL (one JSON line per event, flushed every `CONFIG_TRAIN_STATS_FLUSH_EVERY_STEPS` steps). If training crashes or is interrupted, all metrics up to the last flush are preserved and the run can be inspected or resumed without data loss.
 
-20. **LoRA / QLoRA for local hardware:** Full fine-tuning of Mistral-7B requires >50 GB VRAM. QLoRA (4-bit NF4 base + LoRA adapters in bfloat16) reduces this to ~8–12 GB, fitting on a single RTX 5090 (32 GB) with room for activations and gradient checkpointing. After training, the adapter can be merged into the base model and used by the existing inference pipeline via `CONFIG_INFERENCE_MODEL`.
+20. **LoRA / QLoRA for local hardware:** Full fine-tuning of Mistral-7B requires >50 GB VRAM. QLoRA (4-bit NF4 base + LoRA adapters in bfloat16) reduces this to ~8–12 GB, fitting on a single RTX 5090 (32 GB) with room for activations and gradient checkpointing. After training, the adapter can be evaluated on the test split via `make test-trained-best` (recommended), or merged into the base model and used manually via `CONFIG_INFERENCE_MODEL`.
 
-21. **Training and inference share Kconfig:** Both subsystems read from the same `.config` file generated by `make menuconfig`. The model identity (`CONFIG_INFERENCE_MODEL`), cache paths, and dataset paths are shared. Training adds its own Kconfig menus (`Kconfig.training`, `Kconfig.training_stats`) but does not duplicate inference symbols. After training, the user points `CONFIG_INFERENCE_MODEL` at the merged checkpoint and runs `make run` as usual.
+21. **Training and inference share Kconfig:** Both subsystems read from the same `.config` file generated by `make menuconfig`. The model identity (`CONFIG_INFERENCE_MODEL`), cache paths, split mode, and dataset paths are shared. The split configuration (`Kconfig.split`) is authoritative for both training and inference: training uses the train/validation splits, inference and post-training test evaluation use the test split. Training adds its own Kconfig menus (`Kconfig.training`, `Kconfig.training_stats`, `Kconfig.test_trained`) but does not duplicate inference symbols. After training, the recommended path is `make test-trained-best` (or `make test-trained-latest`) to evaluate on the test split with dedicated output locations and checkpoint provenance. The manual approach of pointing `CONFIG_INFERENCE_MODEL` at a checkpoint and running `make run` is still supported as an advanced alternative.
 
-22. **`README.md` as a concrete deliverable:** The implementation must create and maintain a real, populated `README.md` at the project root so the module is usable without reading the entire 2500-line plan. The README must cover setup, configuration, inference/baseline/training workflows, output locations, and troubleshooting. It must stay aligned with Kconfig options, shipped defconfigs, Makefile targets, output directory layout, and entrypoints. An empty or skeletal README is not acceptable.
+22. **Persistent-by-default storage for Runpod:** All default output/cache/checkpoint paths resolve under `/workspace` (the Runpod Volume disk mount) so that valuable artifacts survive Pod stop/start. The `CONFIG_PERSISTENT_ROOT` and `CONFIG_MODEL_CACHE_DIR` symbols ensure nothing important is accidentally written to Container disk (`/root`, `~/.cache`, etc.) which is ephemeral. Only truly temporary TeX compile scratch uses `/tmp`. This design is explicit in §17 and enforced by `config.py` path resolution.
+
+23. **`README.md` as a concrete deliverable:** The implementation must create and maintain a real, populated `README.md` at the project root so the module is usable without reading the entire 2500-line plan. The README must cover setup, configuration, inference/baseline/training workflows, output locations, and troubleshooting. It must stay aligned with Kconfig options, shipped defconfigs, Makefile targets, output directory layout, and entrypoints. An empty or skeletal README is not acceptable.
+
+24. **Explicit per-dataset split selection:** Rather than loading a single dataset file and deriving splits implicitly, the module supports first-class explicit split construction (`SPLIT_MODE_EXPLICIT_INDICES`) where each of train/validation/test is defined as a union of per-dataset index lists. This gives the user full control over exactly which examples are in each split, supports multi-dataset experiments (e.g. training on WikiTQ-4k + WikiTQ+ simultaneously), and ensures reproducibility without relying on seed arithmetic. The canonical dataset registry (`dataset_registry.py`) maps dataset keys to JSONL paths so that the Kconfig symbols are dataset-name-based, not raw file paths. TabFact+ is excluded from the registry. Seeded-ratio mode (`SPLIT_MODE_SEEDED_RATIO`) is preserved as the default for backward compatibility.
+
+25. **Inference and baselines evaluate only the test split:** All inference/evaluation runs (`make run`, `make run-baseline`, `make run-baseline-fewshot-ph-ext`) are restricted to the configured test split. This prevents accidental evaluation on training or validation data, which would inflate reported metrics. When explicit indices are configured, the test split is exactly the union of `CONFIG_SPLIT_TEST_*_INDICES`; when seeded-ratio mode is active, inference loads the file at `CONFIG_INFERENCE_DATASET_PATH` (default `dataset/WikiTQ-4k/test.jsonl`). An empty test split at inference time is a hard error. This design makes evaluation results unambiguous and comparable across runs.
+
+26. **Per-example provenance metadata:** Every example carries `source_dataset` and `source_index` through the entire pipeline — from split construction through training, inference, and into the output JSONL. This supports post-hoc analysis (e.g. "which WikiTQ-4k examples did the model get wrong?"), debugging (reproduce a specific failure), and cross-run comparison (ensure two runs evaluated the same test set). The metadata is lightweight (two fields per record) and always present regardless of split mode.
+
+27. **Dedicated post-training test evaluation:** Rather than requiring users to manually repoint `CONFIG_INFERENCE_MODEL` and run `make run`, the module provides a first-class `make test-trained` workflow with a dedicated entrypoint (`src/training/test_main.py`), checkpoint resolver (`src/training/checkpoint_resolver.py`), and output paths. This ensures: (a) test evaluation always runs on the test split only, (b) results are written to dedicated locations under `CONFIG_TRAIN_OUTPUT_DIR` that do not overwrite standard `make run` outputs, (c) checkpoint provenance (`checkpoint_source`, `checkpoint_path`, `checkpoint_step`) is recorded in output metadata, and (d) checkpoint resolution is centralized with clear error messages for missing checkpoints. The manual `CONFIG_INFERENCE_MODEL` repointing approach remains as an advanced alternative for non-standard configurations.
+
+28. **Trainer-native checkpointing with project-specific metadata:** Checkpoint save/load is delegated to TRL's Trainer (which uses PEFT `save_pretrained()` for adapter weights and Accelerate `save_state()` for optimizer/scheduler/RNG). The project adds thin wrappers via `MetadataCallback(TrainerCallback)` for: `latest` symlink, `best` copy on metric improvement, `checkpoint_metadata.json`, `checkpoint_index.json`, and config compatibility checks on resume. This avoids reimplementing atomic-save, corruption-detection, and state-restoration logic that Trainer/Accelerate already handle correctly.
+
+29. **Library-first principle:** Every custom subsystem must justify why an established library is insufficient. The delegation map is: GRPO training → TRL `GRPOTrainer`; checkpointing/resume → Trainer/Accelerate; dataset load/split/map → HF `datasets`; template rendering → Jinja2; console UX → Rich; LoRA/QLoRA → PEFT + BitsAndBytes. Custom code is retained only where libraries are genuinely insufficient: AixelAsk monkey-patching (no library can intercept upstream internals), DAG-specific reward parsing (project-specific DAG format), frontier-based parallel DAG executor (no library covers this scheduling pattern), explicit-index split semantics with cross-split overlap prohibition (no library enforces this), Kconfig integration (project's chosen config system), and TeX/PGFPlots learning curve maintenance (no Python library does incremental TeX curve compilation).
 
 ### 12. Training Architecture
 
-This section describes the GRPO+LoRA training subsystem. Training fine-tunes the same Mistral-7B-Instruct model used by the inference pipeline, producing a LoRA adapter (or merged weights) that can be loaded by the existing `CONFIG_INFERENCE_MODEL` path for evaluation.
+This section describes the GRPO+LoRA training subsystem. Training fine-tunes the same Mistral-7B-Instruct model used by the inference pipeline, producing a LoRA adapter (or merged weights) that can be evaluated via `make test-trained`.
+
+**Model identity rule:** `CONFIG_INFERENCE_MODEL` (default: `mistralai/Mistral-7B-Instruct-v0.3`) serves as the **base model identity** for both training and inference. During training, `lora_factory.build_model_and_tokenizer()` loads the base model from this identity and applies LoRA adapters on top. During inference (`make run`), SGLang serves this base model directly. During post-training test evaluation (`make test-trained`), `test_main.py` overrides the model path with the resolved checkpoint (which may be merged weights or a temporarily-merged adapter); the original `CONFIG_INFERENCE_MODEL` value is used only to load the base model for merging if needed. The symbol `CONFIG_INFERENCE_MODEL` in `.config` always refers to the base model identity, never to a checkpoint — checkpoint paths are resolved separately by `checkpoint_resolver.py` or set manually as an advanced override via `make menuconfig`.
 
 #### 12a. High-Level Training Pipeline
+
+The training loop is delegated to TRL's `GRPOTrainer`. The project provides only the reward function, dataset, and `TrainerCallback` subclasses for project-specific outputs.
 
 ```
 train_main.py
@@ -1926,37 +2576,140 @@ train_main.py
   ├── 2. Resolve all seeds (global + stage-specific inheritance)
   │       └── Write resolved_seeds.json (if CONFIG_SAVE_RESOLVED_SEEDS=y)
   ├── 3. Write reward_config.json manifest
-  ├── 4. Create stable train/dev split (split_utils.py)
-  │       ├── If CONFIG_TRAINING_MODE=OVERFIT_POC: use tiny_overfit_poc.py
-  │       ├── If CONFIG_TRAIN_DEV_DATASET_PATH is set: load explicit dev set
-  │       └── Otherwise: seeded random split per CONFIG_TRAIN_SPLIT_RATIO
+  ├── 4. Create train/validation split (split_utils.py, dispatch on CONFIG_SPLIT_MODE)
+  │       ├── If SPLIT_MODE_OVERFIT_POC: use tiny_overfit_poc.py
+  │       ├── If SPLIT_MODE_EXPLICIT_INDICES: build from per-dataset index lists
+  │       │   via dataset_registry.py (union across datasets, with source_dataset/source_index)
+  │       └── If SPLIT_MODE_SEEDED_RATIO: load single file, seeded split (legacy)
+  │       Returns datasets.Dataset objects for train and validation
   ├── 5. Load tokenizer + base model (lora_factory.py)
   │       ├── Load base model with 4-bit quantization (if CONFIG_TRAIN_USE_4BIT=y)
   │       ├── Prepare for k-bit training (peft.prepare_model_for_kbit_training)
   │       ├── Attach LoRA adapters per CONFIG_TRAIN_LORA_* symbols
-  │       ├── Enable gradient checkpointing (if CONFIG_TRAIN_USE_GRADIENT_CHECKPOINTING=y)
-  │       └── If CONFIG_TRAIN_LOAD_FROM_CHECKPOINT=y: load adapter weights
-  ├── 6. Freeze reference model (deep copy of initial policy for KL computation)
-  ├── 7. Format prompt dataset (rl_dataset.py): prompts with gold answers for reward
-  ├── 8. Run GRPO loop (grpo_trainer.py)
-  │       ├── For each batch of prompts:
-  │       │   ├── Sample K completions per prompt (generation.py)
-  │       │   ├── Parse each completion → DAG + answer (dag_reward_parser.py)
-  │       │   ├── Compute reward for each completion (reward.py)
-  │       │   ├── Compute group-relative advantages
-  │       │   ├── Compute clipped surrogate loss + KL penalty
-  │       │   └── Optimizer step
-  │       ├── Periodic eval on dev set
-  │       ├── Periodic checkpoint + best-model saving
-  │       ├── Per-step stats → train_stats.py → per-step JSONL
-  │       └── Periodic curves update + compile (curves.py, tex_compile.py)
-  ├── 9. Save final GRPO checkpoint
-  ├── 10. Final statistics flush (train_stats.py → summary JSON)
-  ├── 11. Final curves compilation (tex_compile.py → all PDFs)
-  └── 12. Optional adapter merge + export (if CONFIG_TRAIN_SAVE_MERGED_ADAPTER=y)
+  │       └── Enable gradient checkpointing (if CONFIG_TRAIN_USE_GRADIENT_CHECKPOINTING=y)
+  ├── 6. Define reward_func(completions, prompts, ...) → list[float]
+  │       └── Calls dag_reward_parser.parse() + reward.compute() for each completion
+  ├── 7. Build GRPOConfig from Kconfig symbols (grpo_trainer.py)
+  │       └── Maps CONFIG_GRPO_* → GRPOConfig fields (see Kconfig.training table)
+  ├── 8. Create GRPOTrainer(model, config, train_dataset, eval_dataset,
+  │       reward_funcs=[reward_func])
+  ├── 9. Register project-specific TrainerCallbacks:
+  │       ├── StatsCallback → train_stats.py (per-step JSONL + per-eval JSONL)
+  │       ├── CurvesCallback → curves.py (TSV + Jinja2-rendered TeX updates)
+  │       └── MetadataCallback → checkpoint_metadata.json, checkpoint_index.json,
+  │                               latest symlink, best copy
+  ├── 10. trainer.train(resume_from_checkpoint=...) if resuming, else trainer.train()
+  │        TRL handles internally:
+  │        ├── Grouped generation (K completions per prompt)
+  │        ├── Reward computation via reward_func callback
+  │        ├── Group-relative advantage normalization
+  │        ├── Clipped surrogate loss + KL penalty
+  │        ├── Optimizer steps + gradient accumulation
+  │        ├── Periodic validation evaluation (no-grad; on validation set only)
+  │        └── Periodic checkpoint saving (Trainer-native: PEFT adapter + optimizer + RNG)
+  ├── 11. Final statistics flush (train_stats.py → summary JSON)
+  ├── 12. Final curves compilation (tex_compile.py → all PDFs)
+  └── 13. Optional adapter merge + export (if CONFIG_TRAIN_SAVE_MERGED_ADAPTER=y)
 ```
 
-**SGLang server is NOT needed for training.** The model is loaded directly via `transformers.AutoModelForCausalLM` + PEFT, not via the SGLang serving infrastructure. Generation during GRPO uses `model.generate()` directly. After training, the user points `CONFIG_INFERENCE_MODEL` at the merged/adapter checkpoint and uses the existing inference pipeline (`make run`).
+**SGLang server is NOT needed for training.** The model is loaded directly via `transformers.AutoModelForCausalLM` + PEFT, not via the SGLang serving infrastructure. Generation during GRPO uses `model.generate()` directly. After training, the user evaluates the trained model on the test split via `make test-trained-best` (recommended) or manually points `CONFIG_INFERENCE_MODEL` at the checkpoint and runs `make run` (advanced alternative).
+
+#### 12a-i. Dataset Registry (`src/training/dataset_registry.py`)
+
+Maps canonical dataset keys to JSONL file paths and provides loading utilities for explicit-index split construction.
+
+**Registry entries:**
+
+```python
+DATASET_REGISTRY = {
+    "wikitq_4k": {
+        "train": "dataset/WikiTQ-4k/train.jsonl",
+        "valid": "dataset/WikiTQ-4k/valid.jsonl",
+        "test":  "dataset/WikiTQ-4k/test.jsonl",
+    },
+    "wikitq_plus": {
+        "train": "dataset/WikiTQ+/train.jsonl",
+        "valid": "dataset/WikiTQ+/valid.jsonl",
+        "test":  "dataset/WikiTQ+/test.jsonl",
+    },
+    "scalability": {
+        "all": [
+            "dataset/Scalability/0-1k.jsonl",
+            "dataset/Scalability/1k-2k.jsonl",
+            "dataset/Scalability/2k-3k.jsonl",
+            "dataset/Scalability/3k-4k.jsonl",
+            "dataset/Scalability/4k-5k.jsonl",
+            "dataset/Scalability/5k+.jsonl",
+        ]
+    },
+}
+```
+
+**Public API:**
+
+- `get_canonical_path(dataset_key: str, split: str) -> str` — returns the resolved absolute path for a dataset/split pair. For Scalability, returns a list of paths (since it is multi-file). All paths resolved against the AixelAsk repo root.
+- `load_examples(dataset_key: str, split: str, indices: list[int]) -> list[SplitEntry]` — loads the specified examples from the canonical JSONL, returning `SplitEntry` objects with `source_dataset`, `source_index`, and the parsed example dict. Validates that indices are in-bounds. For Scalability, concatenates sub-files in lexicographic order and maps indices into the combined sequence.
+- `count_examples(dataset_key: str, split: str) -> int` — returns the total number of lines in the canonical JSONL (or combined count for Scalability). Used for bounds checking.
+
+**Scalability concatenation:** The six Scalability sub-files are concatenated in lexicographic filename order. The registry maintains a cumulative offset table (e.g. `0-1k.jsonl` starts at index 0, `1k-2k.jsonl` starts at index N₁, etc.) so that index-to-subfile mapping is O(log K) via binary search. This offset table is computed once when the registry is first accessed.
+
+**TabFact+ exclusion:** The registry has no entry for TabFact+. Any attempt to use a dataset key containing `"tabfact"` raises a clear error.
+
+#### 12a-ii. Split Construction (`src/training/split_utils.py`)
+
+This module is the single authoritative place for split construction across all three modes. It uses **HF `datasets.Dataset`** for all data loading, selection, and concatenation, and adds only project-specific logic for explicit-index semantics, cross-split overlap prohibition, and provenance injection.
+
+**Library delegation:** `datasets.Dataset.from_json()` for JSONL loading, `.select()` for index-based selection, `datasets.concatenate_datasets()` for multi-dataset union, `.map()` for provenance field injection.
+
+**Custom logic (project-specific):** Cross-split overlap check (no library provides this), canonical dataset registry mapping (`dataset_registry.py`), `source_dataset` / `source_index` provenance injection, empty-split validation rules.
+
+It dispatches based on `CONFIG_SPLIT_MODE`:
+
+**`SPLIT_MODE_SEEDED_RATIO`** (legacy default):
+- Loads the single dataset file via `datasets.Dataset.from_json(CONFIG_TRAIN_DATASET_PATH)`.
+- If `CONFIG_TRAIN_DEV_DATASET_PATH` is set, loads it as an explicit dev set. Otherwise, creates a seeded train/dev split using `dataset.train_test_split(test_size=1-ratio, seed=seed)`.
+- The test split for inference is constructed by `pipeline.py` (see §4 `pipeline.py` Step 0).
+- Each example gets `source_dataset` derived from `CONFIG_DATASET` and `source_index` as its line number, injected via `.map()`.
+
+**`SPLIT_MODE_EXPLICIT_INDICES`**:
+- For each of the 9 `CONFIG_SPLIT_{TRAIN,VALID,TEST}_{WIKITQ_4K,WIKITQ_PLUS,SCALABILITY}_INDICES` symbols:
+  - Skip if empty (dataset contributes nothing to that split).
+  - Load the canonical JSONL via `dataset_registry` → `datasets.Dataset.from_json()`.
+  - Select specific indices via `dataset.select(indices)`.
+  - Inject provenance via `dataset.map(lambda ex, idx: {**ex, "source_dataset": key, "source_index": indices[idx]})`.
+- Merge per-dataset selections into `split_train`, `split_valid`, `split_test` via `datasets.concatenate_datasets()`.
+- **Dedup:** Within each index list, duplicates are already removed during parsing (see `config.py`).
+- **Overlap check (custom):** Verify that no `(source_dataset, source_index)` pair appears in more than one of train/valid/test. If duplicates exist, raise `ValueError` listing all offending pairs.
+- **Bounds check:** Already enforced during `config.py` parsing (indices validated against `dataset_registry.count_examples()`).
+
+**`SPLIT_MODE_OVERFIT_POC`**:
+- Delegates to `tiny_overfit_poc.py` as before. Selected subset is used as both train and dev.
+
+**Return type:** All modes return `datasets.Dataset` objects (not custom dataclasses) with provenance columns:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `prompt` | string | Formatted prompt text for GRPO |
+| `gold_answer` | string | Ground-truth answer for reward computation |
+| `source_dataset` | string | Dataset key: `"wikitq_4k"`, `"wikitq_plus"`, or `"scalability"` |
+| `source_index` | int | Zero-based index in canonical JSONL |
+| (all original JSONL fields) | various | Preserved from source data |
+
+The returned `datasets.Dataset` objects are passed directly to `GRPOTrainer(train_dataset=..., eval_dataset=...)`.
+
+#### 12a-iii. Training Config Updates (`src/training/train_config.py`)
+
+The training config dataclass is extended with:
+
+- `split_mode: str` — `"seeded_ratio"`, `"explicit_indices"`, or `"overfit_poc"`.
+- `split_train_indices: dict[str, list[int]]` — parsed per-dataset index lists for train (keys: `"wikitq_4k"`, `"wikitq_plus"`, `"scalability"`; values: sorted deduplicated index lists, or empty lists).
+- `split_valid_indices: dict[str, list[int]]` — same structure for validation.
+- `split_test_indices: dict[str, list[int]]` — same structure for test.
+- All three are populated from the 9 `CONFIG_SPLIT_*_INDICES` symbols via `config.py` parsing.
+
+#### 12a-iv. RL Dataset Formatting (`src/training/rl_dataset.py`)
+
+Formats the split `datasets.Dataset` objects for TRL's `GRPOTrainer`. Uses `dataset.map()` to transform each example into the prompt format expected by the trainer, preserving `source_dataset` and `source_index` as additional columns. The gold answer is stored in a column accessible to the reward function. This module is thin — it is essentially a `datasets.Dataset.map()` call with a project-specific formatting function. It does not implement custom data loading or iteration; that is handled by TRL's internal dataloader.
 
 #### 12b. Reward Computation (`src/training/reward.py`)
 
@@ -1989,22 +2742,33 @@ The reward function is deterministic given the same inputs (no stochastic compon
 
 #### 12c. GRPO Algorithm (`src/training/grpo_trainer.py`)
 
-GRPO (Group Relative Policy Optimization) is implemented manually without the `trl` library.
+GRPO (Group Relative Policy Optimization) is delegated to TRL's `GRPOTrainer`. The project provides only the reward function and dataset; TRL handles all training internals.
 
-**Per-step procedure:**
+**Library delegation boundary:**
 
-1. **Sample prompts:** Draw a batch of `CONFIG_GRPO_BATCH_SIZE_PROMPTS` prompts from the training dataset.
-2. **Generate grouped completions:** For each prompt, sample `K = CONFIG_GRPO_GROUP_SIZE` completions using the current policy model with temperature `CONFIG_GRPO_TEMPERATURE`, top-p `CONFIG_GRPO_TOP_P`, top-k `CONFIG_GRPO_TOP_K`, and max new tokens `CONFIG_GRPO_MAX_NEW_TOKENS`. This produces `B * K` completions total.
-3. **Compute rewards:** For each completion, call `dag_reward_parser.parse(completion)` to extract the DAG and answer, then call `reward.compute(parsed_output, gold_answer)` to get the scalar reward `r_ij`.
-4. **Compute group-relative advantages:** For each prompt `i`, compute group mean `μ_i = mean(r_i1, ..., r_iK)` and group std `σ_i = std(r_i1, ..., r_iK)`. If `CONFIG_GRPO_NORMALIZE_ADVANTAGES=y`, the advantage for completion `j` of prompt `i` is: `A_ij = (r_ij - μ_i) / (σ_i + ε)` where `ε = CONFIG_GRPO_EPSILON_STD`. If normalization is disabled, `A_ij = r_ij - μ_i`.
-5. **Compute log-probabilities:** For each completion, compute `log π_θ(a_ij | prompt_i)` under the current policy and `log π_ref(a_ij | prompt_i)` under the frozen reference model.
-6. **Compute clipped surrogate loss:** `ratio = exp(log π_θ - log π_old)` where `π_old` is the policy at the time of generation (for on-policy GRPO, `π_old = π_θ` so `ratio = 1` on the first pass; if multiple gradient steps per batch are taken, the ratio diverges). Clipped loss: `L_clip = -min(ratio * A, clip(ratio, 1-ε, 1+ε) * A)` where `ε = CONFIG_GRPO_CLIP_EPS`.
-7. **KL penalty:** `L_KL = CONFIG_GRPO_KL_COEF * KL(π_θ || π_ref)` estimated per-token as `log π_θ - log π_ref`.
-8. **Total loss:** `L = L_clip + L_KL`, averaged over all tokens and completions in the batch.
-9. **Optimizer step:** Backprop, gradient accumulation over `CONFIG_GRPO_GRAD_ACCUM` micro-batches, then `optimizer.step()`.
-10. **Log per-step stats** to `train_stats.py`.
+TRL `GRPOTrainer` handles internally (not reimplemented by this project):
+- Grouped generation: for each prompt, sample `K = num_generations` completions using the policy model
+- Reference model management: TRL creates and maintains the frozen reference model for KL computation
+- Log-probability computation under current policy and reference model
+- Group-relative advantage normalization: `A_ij = (r_ij - μ_i) / (σ_i + ε)`
+- Clipped surrogate loss: `L_clip = -min(ratio * A, clip(ratio, 1-ε, 1+ε) * A)`
+- KL penalty: `L_KL = beta * KL(π_θ || π_ref)`
+- Optimizer steps with gradient accumulation
+- Periodic checkpointing via Trainer-native `save_model()` / Accelerate `save_state()`
+- Resume from checkpoint via `trainer.train(resume_from_checkpoint=path)`
 
-**Quantities logged per step:** `global_step`, `epoch`, `lr`, `grad_norm`, `train_policy_loss`, `train_kl_loss`, `train_total_loss`, `reward_mean`, `reward_std`, `reward_min`, `reward_max`, `reward_correctness_mean`, `reward_validity_mean`, `reward_depth_mean`, `invalid_rate`, `depth_mean`, `depth_std`, `validity_rate`, `correctness_rate`, `advantage_mean`, `advantage_std`, `group_reward_std_mean`, `response_len_mean`, `response_len_std`, `parse_success_rate`, `dag_parse_fail_rate`, `tokens_seen`, `prompts_seen`, `samples_generated`, `wallclock_sec`, `step_time_sec`.
+**Project-specific components (custom, justified):**
+
+- **`reward_func(completions, prompts, ...) -> list[float]`**: Called by TRL for each batch of completions. Internally calls `dag_reward_parser.parse(completion)` to extract the DAG and answer, then `reward.compute(parsed, gold_answer)` to compute the weighted scalar reward `r = w_correct * r_correct + w_valid * r_valid - w_depth * depth_term - w_invalid * 1[invalid]`. This function is project-specific because it requires DAG parsing and the project's reward formula.
+- **`StatsCallback(TrainerCallback)`**: Registered on the trainer. On each step, extracts metrics from `trainer.state` and writes project-specific JSONL + curves TSV. On each eval, writes per-eval JSONL.
+- **`CurvesCallback(TrainerCallback)`**: Updates TSV data files and regenerates Jinja2-rendered TeX templates on the configured cadence. Triggers `tex_compile.py` for PDF compilation.
+- **`MetadataCallback(TrainerCallback)`**: On each checkpoint save event, writes `checkpoint_metadata.json`, updates `checkpoint_index.json`, maintains `latest` symlink and `best` copy.
+
+All optimizer batches are drawn exclusively from the **train split** (enforced by TRL via the `train_dataset` argument). The validation split is evaluated periodically by TRL under no-gradient inference mode only (via `eval_dataset`). Validation is never used for gradient updates.
+
+**Quantities logged per step** (extracted from `trainer.state.log_history` by `StatsCallback`): `global_step`, `epoch`, `lr`, `grad_norm`, `train_policy_loss`, `train_kl_loss`, `train_total_loss`, `reward_mean`, `reward_std`, `reward_min`, `reward_max`, `reward_correctness_mean`, `reward_validity_mean`, `reward_depth_mean`, `invalid_rate`, `depth_mean`, `depth_std`, `validity_rate`, `correctness_rate`, `advantage_mean`, `advantage_std`, `group_reward_std_mean`, `response_len_mean`, `response_len_std`, `parse_success_rate`, `dag_parse_fail_rate`, `tokens_seen`, `prompts_seen`, `samples_generated`, `wallclock_sec`, `step_time_sec`.
+
+Note: Some of these metrics (reward breakdown, DAG-specific rates) are computed inside `reward_func` and stored in a thread-safe accumulator that `StatsCallback` reads at each step boundary. TRL's built-in metrics (loss, lr, grad_norm) are read directly from `trainer.state`.
 
 #### 12d. LoRA / QLoRA Model Loading (`src/training/lora_factory.py`)
 
@@ -2013,9 +2777,10 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 
 def build_model_and_tokenizer(config):
+    # config.py has already set HF_HOME = config.MODEL_CACHE_DIR,
+    # so from_pretrained uses $HF_HOME/hub/ automatically.
     tokenizer = AutoTokenizer.from_pretrained(
         config.INFERENCE_MODEL,
-        cache_dir=config.MODEL_CACHE_DIR,
         trust_remote_code=config.TRUST_REMOTE_CODE,
     )
     if tokenizer.pad_token is None:
@@ -2034,7 +2799,6 @@ def build_model_and_tokenizer(config):
         config.INFERENCE_MODEL,
         quantization_config=bnb_config,
         device_map="auto",
-        cache_dir=config.MODEL_CACHE_DIR,
         trust_remote_code=config.TRUST_REMOTE_CODE,
     )
 
@@ -2054,21 +2818,252 @@ def build_model_and_tokenizer(config):
     )
     model = get_peft_model(model, lora_config)
     return model, tokenizer
+
+
+def merge_and_export(adapter_path: str, output_dir: str, config) -> str:
+    """Load a LoRA adapter checkpoint, merge into base model, save full weights.
+
+    Used by test_main.py when the resolved checkpoint is adapter-only
+    (adapter_config.json + adapter_model.safetensors) and SGLang requires
+    merged full weights.  Also used by checkpointing.py at end-of-training
+    when CONFIG_TRAIN_SAVE_MERGED_ADAPTER=y.
+
+    Returns output_dir (the path where merged weights were saved).
+    """
+    tokenizer = AutoTokenizer.from_pretrained(
+        config.INFERENCE_MODEL,
+        trust_remote_code=config.TRUST_REMOTE_CODE,
+    )
+    model = AutoModelForCausalLM.from_pretrained(
+        config.INFERENCE_MODEL,
+        device_map="auto",
+        trust_remote_code=config.TRUST_REMOTE_CODE,
+    )
+    from peft import PeftModel
+    model = PeftModel.from_pretrained(model, adapter_path)
+    model = model.merge_and_unload()
+    model.save_pretrained(output_dir)
+    tokenizer.save_pretrained(output_dir)
+    return output_dir
 ```
 
-**Checkpoint resume:** If `CONFIG_TRAIN_LOAD_FROM_CHECKPOINT=y`, `lora_factory` calls `PeftModel.from_pretrained(base_model, checkpoint_path)` to load saved adapter weights. The optimizer state is loaded separately by `checkpointing.py`.
+**Checkpoint resume:** Resume is handled by TRL's Trainer-native `resume_from_checkpoint` mechanism. When `--resume` is passed, `train_main.py` resolves the checkpoint path (see §12d-i) and passes it to `trainer.train(resume_from_checkpoint=path)`. The Trainer restores model/adapter weights, optimizer, scheduler, and RNG states automatically via Accelerate.
 
-**Reference model:** For KL computation in GRPO, a frozen copy of the initial policy is created via `copy.deepcopy(model)`. All parameters in the reference model have `requires_grad=False`. The reference model shares the 4-bit base weights (only the LoRA adapters differ).
+**Reference model:** For KL computation in GRPO, TRL's `GRPOTrainer` creates and manages the frozen reference model internally. The project does not need to create a `deepcopy` or manage reference model lifecycle.
 
-#### 12e. Integration with Inference
+#### 12d-i. Checkpoint Layout and Project-Specific Metadata (`src/training/checkpointing.py`)
 
-After training completes, the LoRA adapter (or merged checkpoint if `CONFIG_TRAIN_SAVE_MERGED_ADAPTER=y`) is saved to `CONFIG_TRAIN_OUTPUT_DIR`. To use the fine-tuned model for inference:
+Checkpoint save/load is delegated to TRL's Trainer-native mechanisms (which use PEFT `save_pretrained()` for adapter weights and Accelerate `save_state()` for optimizer/scheduler/RNG). The project's `checkpointing.py` adds only **thin project-specific wrappers** on top, via `MetadataCallback(TrainerCallback)`:
 
-1. If adapter-only: set `CONFIG_INFERENCE_MODEL` to the base model path and add the adapter loading path (or merge the adapter using `model.merge_and_unload()` as a post-training step).
-2. If merged: set `CONFIG_INFERENCE_MODEL` to the merged checkpoint path (e.g. `output/train_grpo/merged/`).
-3. Run `make run` as usual. The inference pipeline loads the fine-tuned model via SGLang.
+**Checkpoint directory layout:**
 
-The training and inference subsystems share the same `CONFIG_INFERENCE_MODEL` symbol, ensuring consistency.
+```
+<CONFIG_TRAIN_OUTPUT_DIR>/
+├── checkpoint-50/                  # Trainer-native periodic checkpoint (step 50)
+│   ├── adapter_config.json         # PEFT adapter config (standard format)
+│   ├── adapter_model.safetensors   # LoRA adapter weights (standard format)
+│   ├── optimizer.pt                # Optimizer state (Accelerate format)
+│   ├── scheduler.pt                # LR scheduler state (Accelerate format)
+│   ├── rng_state_*.pth             # RNG states (Accelerate format)
+│   ├── trainer_state.json          # Trainer state: global_step, epoch, log_history (TRL native)
+│   ├── training_args.bin           # GRPOConfig serialized (TRL native)
+│   ├── config_snapshot.json        # PROJECT-SPECIFIC: frozen Kconfig symbols for compatibility checks
+│   ├── reward_config.json          # PROJECT-SPECIFIC: frozen reward weights
+│   └── checkpoint_metadata.json    # PROJECT-SPECIFIC: step, timestamp, save_reason, metric_name/value
+├── checkpoint-100/                 # Trainer-native periodic checkpoint (step 100)
+│   └── ... (same structure)
+├── latest -> checkpoint-100        # PROJECT-SPECIFIC: symlink to most recent checkpoint
+├── best/                           # PROJECT-SPECIFIC: copy of checkpoint with best validation metric
+├── final/                          # PROJECT-SPECIFIC: saved at normal completion
+├── merged/                         # PROJECT-SPECIFIC: full-weight merged model (if enabled)
+└── checkpoint_index.json           # PROJECT-SPECIFIC: manifest of all checkpoints
+```
+
+**Library vs. project responsibilities:**
+
+| Responsibility | Handled by | Notes |
+|---------------|-----------|-------|
+| Saving adapter weights | PEFT `save_pretrained()` (via Trainer) | Standard PEFT format; compatible with `PeftModel.from_pretrained()` |
+| Saving optimizer + scheduler + RNG | Accelerate `save_state()` (via Trainer) | Restored automatically on `resume_from_checkpoint` |
+| `trainer_state.json` with step/epoch/log history | TRL Trainer | Used by Trainer for resume position |
+| `training_args.bin` | TRL Trainer | Serialized GRPOConfig |
+| `config_snapshot.json` | `MetadataCallback` (project) | Kconfig symbols snapshot for compatibility checks on resume |
+| `reward_config.json` | `MetadataCallback` (project) | Reward weights for auditability |
+| `checkpoint_metadata.json` | `MetadataCallback` (project) | Step, timestamp, save_reason, metric name/value |
+| `latest` symlink | `MetadataCallback` (project) | Updated atomically after each Trainer save event |
+| `best/` copy | `MetadataCallback` (project) | Copied when `CONFIG_TRAIN_SAVE_BEST_BY` metric improves |
+| `checkpoint_index.json` | `MetadataCallback` (project) | Manifest for `checkpoint_resolver.py` |
+| Merged export | `checkpointing.py` (project) | `model.merge_and_unload()` + `save_pretrained()` at end of training |
+
+**`checkpoint_index.json`** (project-specific manifest):
+
+```json
+{
+  "checkpoints": [
+    {"step": 50, "path": "checkpoint-50/", "timestamp": "2026-03-05T14:00:00Z", "save_reason": "periodic"},
+    {"step": 100, "path": "checkpoint-100/", "timestamp": "2026-03-05T14:15:00Z", "save_reason": "periodic"},
+    {"step": 100, "path": "best/", "timestamp": "2026-03-05T14:15:01Z", "save_reason": "best", "metric_name": "eval_reward_mean", "metric_value": 0.68}
+  ],
+  "latest": "checkpoint-100/",
+  "best": "best/",
+  "final": null
+}
+```
+
+#### 12d-ii. Resume Semantics
+
+Resume is handled by `trainer.train(resume_from_checkpoint=path)`. TRL/Accelerate restores model weights, optimizer, scheduler, RNG states, and step counters from the checkpoint directory. The project adds a thin config-compatibility check before calling `trainer.train()`.
+
+**Invocation precedence (highest to lowest):**
+
+| Source | Condition | Behavior |
+|--------|-----------|----------|
+| CLI `--resume --checkpoint-path /explicit/path` | Explicit path on command line | Pass that path to `trainer.train(resume_from_checkpoint=path)` |
+| `CONFIG_TRAIN_CHECKPOINT_PATH` (non-empty) + `CONFIG_TRAIN_LOAD_FROM_CHECKPOINT=y` | Config specifies a path | Use that path |
+| CLI `--resume` (no explicit path) | No path specified | Auto-detect: resolve `latest` symlink under `CONFIG_TRAIN_OUTPUT_DIR`; if that fails, scan `checkpoint_index.json` in reverse order |
+| Neither `--resume` nor `CONFIG_TRAIN_LOAD_FROM_CHECKPOINT=y` | Fresh training | Start from scratch (`trainer.train()` with no `resume_from_checkpoint`) |
+
+**Config compatibility checks on resume:**
+
+Before calling `trainer.train(resume_from_checkpoint=...)`, the project's `checkpointing.py` loads `config_snapshot.json` from the target checkpoint and compares it with the current `.config`. Fatal mismatches (base model identity, LoRA rank/alpha/target modules, 4-bit vs non-4-bit, training mode, split mode/dataset/indices) block resume with a `ValueError`. Non-fatal mismatches (eval/save cadence, logging paths, reward weights) produce warnings. Trainer handles all internal state compatibility (model shape, optimizer groups) natively.
+
+#### 12d-iii. Save Policies
+
+**Periodic checkpoints:** Saved every `CONFIG_GRPO_SAVE_EVERY_STEPS` steps by Trainer (via `GRPOConfig.save_steps`). Creates `checkpoint-NNNN/` directories in standard Trainer format.
+
+**`latest` (project-specific):** Symlink updated by `MetadataCallback.on_save()` after each successful Trainer checkpoint save. Points to the newest checkpoint directory.
+
+**`best` (project-specific):** Updated by `MetadataCallback.on_evaluate()` when the tracked metric (`CONFIG_TRAIN_SAVE_BEST_BY`) improves. The callback copies the latest checkpoint directory to `best/`. **Disabled when the validation split is empty.**
+
+**`final` (project-specific):** Saved by `MetadataCallback.on_train_end()` at normal training completion.
+
+**Interrupt:** On SIGINT/SIGTERM, Trainer's built-in signal handling attempts a checkpoint save. `MetadataCallback.on_save()` updates the `latest` symlink. This is best-effort.
+
+**`merged` (project-specific):** Created at end of training if `CONFIG_TRAIN_SAVE_MERGED_ADAPTER=y`. Uses `model.merge_and_unload()` + `model.save_pretrained()`. Contains inference-ready weights only — not suitable for training resume.
+
+#### 12e. Integration with Inference / Post-Training Test Evaluation
+
+After training completes, the LoRA adapter (or merged checkpoint if `CONFIG_TRAIN_SAVE_MERGED_ADAPTER=y`) is saved to `CONFIG_TRAIN_OUTPUT_DIR`. There are two ways to evaluate the trained model on the test split:
+
+**Recommended: `make test-trained` (first-class post-training test evaluation)**
+
+The dedicated post-training test workflow evaluates a trained checkpoint on the **test split only** with dedicated output locations and checkpoint provenance metadata:
+
+- `make test-trained` — evaluates the checkpoint selected by `CONFIG_TEST_TRAINED_CHECKPOINT_SOURCE` (default: `best`).
+- `make test-trained-best` — forces evaluation of the best checkpoint (overrides the config).
+- `make test-trained-latest` — forces evaluation of the latest checkpoint.
+
+These targets invoke `src/training/test_main.py`, which resolves the checkpoint via `checkpoint_resolver.py`, starts the SGLang server with the trained model, runs the inference pipeline on the test split only, and writes results to dedicated output paths (e.g. `output/train_grpo/test_best/results.jsonl`). Checkpoint provenance (`checkpoint_source`, `checkpoint_path`, `checkpoint_step`) is recorded in output metadata.
+
+This is the recommended path because it: (a) enforces test-split-only evaluation, (b) writes to dedicated output locations that do not overwrite standard `make run` results, (c) records which checkpoint was evaluated, and (d) provides clear error messages if the checkpoint is missing.
+
+**Adapter-only vs. merged checkpoints for SGLang:** SGLang requires a complete model directory (full weights or a model with merged adapters). Adapter-only checkpoint directories (`adapter_config.json` + `adapter_model.safetensors` without `config.json` + `model*.safetensors`) cannot be served by SGLang directly. When `test_main.py` resolves an adapter-only checkpoint (i.e., the directory contains adapter files but no full model weights), it automatically merges the adapter into the base model using `lora_factory.merge_and_export()`, writing the merged result to a temporary directory under `CONFIG_EPHEMERAL_TMPDIR`. The merged directory is then served by SGLang for evaluation and cleaned up on exit. The `merged/` checkpoint type (from end-of-training export with `CONFIG_TRAIN_SAVE_MERGED_ADAPTER=y`) is already in full-weights format and can be served directly without a merge step. Users who frequently run `make test-trained` on adapter-only checkpoints should consider enabling `CONFIG_TRAIN_SAVE_MERGED_ADAPTER=y` to avoid repeated merge overhead.
+
+**Advanced/manual: `make run` with explicit `CONFIG_INFERENCE_MODEL` override**
+
+For custom configurations or non-standard models, the user can still manually set `CONFIG_INFERENCE_MODEL` to a checkpoint path (e.g. `output/train_grpo/checkpoints/merged/`) and run `make run`. This remains supported but is no longer the recommended path for standard post-training evaluation. When using this approach, the user must manage output paths manually to avoid overwriting standard inference results.
+
+#### 12e-i. Checkpoint Resolver (`src/training/checkpoint_resolver.py`)
+
+Centralizes checkpoint path resolution and validation for post-training test evaluation.
+
+**Public API:**
+
+```python
+@dataclass
+class ResolvedCheckpoint:
+    source: str                    # "best", "latest", "merged", "explicit_path"
+    path: str                      # resolved absolute path to the checkpoint directory
+    step: int | None               # training step (from checkpoint metadata, if available)
+    metric_name: str | None        # e.g. "eval_reward_mean" (for best checkpoint)
+    metric_value: float | None     # metric value that selected this as "best"
+    is_adapter_only: bool          # True if directory contains adapter files only (no full model weights); caller must merge before SGLang serving
+
+def resolve_test_checkpoint(config, override_source: str | None = None) -> ResolvedCheckpoint
+```
+
+**SGLang serving rule:** SGLang cannot serve adapter-only checkpoints (directories containing `adapter_config.json` + `adapter_model.safetensors` but no full-weight `config.json` + `model*.safetensors`). When `resolve_test_checkpoint` returns `is_adapter_only=True`, the caller (`test_main.py`) must merge the adapter into the base model via `lora_factory.merge_and_export()` before starting SGLang. The merged result is written to a temporary directory under `CONFIG_EPHEMERAL_TMPDIR` and cleaned up on exit. Pre-merged checkpoints (from `CONFIG_TRAIN_SAVE_MERGED_ADAPTER=y`) can be served directly. See §12e for the full adapter-vs-merged flow.
+
+**Resolution logic:**
+
+1. Determine source: if `override_source` is provided (from `--checkpoint` CLI flag), use it; otherwise use `config.TEST_TRAINED_CHECKPOINT_SOURCE`.
+2. Map source to path (using `checkpoint_index.json` when available, or direct directory lookup):
+   - `"best"` → `<TRAIN_OUTPUT_DIR>/checkpoints/best/`
+   - `"latest"` → resolve `latest` symlink under `<TRAIN_OUTPUT_DIR>/checkpoints/`
+   - `"merged"` → `<TRAIN_OUTPUT_DIR>/checkpoints/merged/`
+   - `"explicit_path"` → `config.TEST_TRAINED_CHECKPOINT_PATH`
+3. Verify the directory exists and contains expected files (adapter weights: `adapter_config.json` + `adapter_model.safetensors`; or full model: `config.json` + `model*.safetensors`).
+4. If a `checkpoint_metadata.json` file exists in the directory (written by `checkpointing.py`), read `step`, `metric_name`, and `metric_value` from it.
+5. Return a `ResolvedCheckpoint` with all fields populated.
+
+**Failure modes** (all raise `FileNotFoundError` with an actionable error message):
+
+| Condition | Error message |
+|-----------|---------------|
+| Best checkpoint missing | `"Best checkpoint not found at <path>. Has training completed with at least one evaluation step?"` |
+| Latest checkpoint missing | `"Latest checkpoint not found at <path>. Has training saved at least one checkpoint?"` |
+| Merged checkpoint missing | `"Merged checkpoint not found at <path>. Did you set CONFIG_TRAIN_SAVE_MERGED_ADAPTER=y during training?"` |
+| Explicit path missing | `"Checkpoint path does not exist: <path>"` |
+
+#### 12e-ii. Post-Training Test Entrypoint (`src/training/test_main.py`)
+
+**Invocation:** `python -m src.training.test_main --config .config [--checkpoint best|latest|merged|explicit]`
+
+This is a dedicated entrypoint for evaluating trained checkpoints on the test split. It processes **only test-split examples** — train and validation examples are never loaded or evaluated. It is explicitly separate from training (`train_main.py` — GRPO loop with periodic validation-set evaluation) and from standard inference (`src.main` / `pipeline.py` — evaluation with whatever model is configured in `CONFIG_INFERENCE_MODEL`).
+
+**Flow:**
+
+```
+test_main.py
+  │
+  ├── 1. Parse .config via config.py
+  ├── 2. Resolve checkpoint via checkpoint_resolver.resolve_test_checkpoint(config, override)
+  │       └── Validates checkpoint exists; reads metadata (step, metric) if available
+  ├── 2a. If resolved_checkpoint.is_adapter_only:
+  │       ├── merge_dir = tempfile.mkdtemp(dir=config.EPHEMERAL_TMPDIR, prefix="merged_ckpt_")
+  │       ├── lora_factory.merge_and_export(resolved_checkpoint.path, merge_dir, config)
+  │       ├── Register atexit(shutil.rmtree, merge_dir)
+  │       └── resolved_checkpoint.path = merge_dir   # point to merged weights
+  ├── 3. Override config fields for this evaluation:
+  │       ├── config.INFERENCE_MODEL = resolved_checkpoint.path  (merged or already full-weight)
+  │       ├── config.RESULT_FILE = config.TEST_TRAINED_RESULT_FILE
+  │       └── config.DAG_STATS_FILE = config.TEST_TRAINED_DAG_STATS_FILE
+  ├── 4. Setup logging (logging_setup.py)
+  ├── 5. Register atexit(sglang_server.stop)
+  ├── 6. Start SGLang server with the (possibly merged) trained model
+  ├── 7. Init sglang_client, embedding_client, semaphores
+  ├── 8. Apply monkey-patches (same as src/main.py: patch_request_gpt, patch_dag with call_recorder, patch_dag_execution)
+  ├── 9. Run pipeline.run(config) — TEST SPLIT ONLY
+  │       └── (identical to standard inference; only the model and output paths differ)
+  ├── 10. Print accuracy summary
+  ├── 11. Write test_eval_summary.json to CONFIG_TEST_TRAINED_OUTPUT_DIR:
+  │        ├── checkpoint_source, checkpoint_path, checkpoint_step
+  │        ├── checkpoint_metric_name, checkpoint_metric_value
+  │        ├── accuracy, total_items, total_correct
+  │        ├── dag_stats summary (if enabled)
+  │        └── timestamp
+  └── 12. Stop SGLang server (merge_dir cleaned up via atexit if created)
+```
+
+**Key points:**
+- Step 2a handles adapter-only checkpoints: SGLang cannot serve adapter-only directories, so the adapter is merged into the base model in a temporary directory under `CONFIG_EPHEMERAL_TMPDIR`. The temp directory is cleaned up on exit via `atexit`. Pre-merged checkpoints (from `CONFIG_TRAIN_SAVE_MERGED_ADAPTER=y`) skip this step.
+- Steps 5–10 mirror the flow in `src/main.py` (§6 Startup/Shutdown Logic). The only differences are: (a) the model path is the resolved (and possibly merged) checkpoint, not `CONFIG_INFERENCE_MODEL` from the original config; (b) output files go to dedicated test-trained paths; (c) a `test_eval_summary.json` is written with checkpoint provenance.
+- The pipeline (`pipeline.run`) executes identically to standard inference: test split only, same DAG executor, same embedding client, same stats collection. The trained model is served by SGLang just like any other model.
+- `test_main.py` does **not** load the model via `transformers` / PEFT directly for inference. It serves the checkpoint through SGLang, matching the standard inference path. The only PEFT usage is the temporary merge step (2a) when the checkpoint is adapter-only.
+
+#### 12f. `src/training/tex_compile.py` — Periodic TeX → PDF Compilation
+
+Compiles `.tex` learning curve files to PDF on a configurable schedule during training (every `CONFIG_TRAIN_CURVES_COMPILE_EVERY_STEPS` steps) and once at end of run (if `CONFIG_TRAIN_CURVES_COMPILE_AT_END=y`).
+
+**Storage behavior:**
+
+- **Ephemeral scratch (Container disk):** All intermediate compile artifacts — `.aux`, `.log`, `.fls`, `.synctex.gz`, and the temporary working directory itself — are created under `CONFIG_EPHEMERAL_TMPDIR` (default `/tmp`). The temp working directory is cleaned up after each compilation attempt regardless of success or failure.
+- **Persistent output (Volume disk):** Final `.pdf` files are written to `CONFIG_TRAIN_CURVES_DIR/pdf/`. `compile_status.json` (per-file success/failure/timestamp) is written to `CONFIG_TRAIN_CURVES_DIR/manifests/`.
+- **Invariant:** Final PDFs and status files must **never** exist only in `/tmp`. If compilation succeeds, the PDF is moved from the temp dir to the persistent output directory before cleanup. If compilation fails, the failure is recorded in the persistent `compile_status.json` and logged; no PDF is produced but existing PDFs from previous compilations are preserved.
+
+**Compile command:** If `CONFIG_TRAIN_CURVES_LATEXMK=y`: `latexmk -pdf -<engine> -output-directory=<tmpdir> <file>.tex`, then copy PDF to persistent dir. If `n`: `<engine> -interaction=nonstopmode -output-directory=<tmpdir> <file>.tex`, then copy. Each compilation is killed after `CONFIG_TRAIN_CURVES_PDFLATEX_TIMEOUT_SEC` seconds.
+
+**Non-fatal failures:** Compilation failures are logged at WARNING level and recorded in `compile_status.json`. Training **never** crashes due to TeX compilation failure.
 
 ### 13. Overfit-on-Small-Sample PoC
 
@@ -2086,12 +3081,12 @@ Controlled by `CONFIG_OVERFIT_POC_SELECTION_MODE`:
 | `RANDOM_SEEDED` | Seed a `random.Random(CONFIG_GLOBAL_SEED)` instance, sample `CONFIG_OVERFIT_POC_NUM_EXAMPLES` indices without replacement |
 | `FIXED_INDICES_FILE` | Load explicit integer indices (one per line) from `CONFIG_OVERFIT_POC_INDICES_FILE` |
 
-In `TRAINING_MODE_OVERFIT_POC`, the selected subset is used as **both** the training set and the dev set (the model is evaluated on the same examples it trains on). This is intentional: the goal is to verify that reward increases and the model can memorize a small set.
+In `TRAINING_MODE_OVERFIT_POC`, `CONFIG_SPLIT_MODE` is forced to `SPLIT_MODE_OVERFIT_POC` (see `Kconfig.training`). The selected subset is used as **both** the training set and the validation set (the model is evaluated on the same examples it trains on). This is the **only** intentional exception to the general rule that validation data must not overlap with training data — and it applies only in overfit-PoC mode. The goal is to verify that reward increases and the model can memorize a small set, not to measure generalization.
 
 #### 13c. Default PoC Configuration (`defconfig.train_overfit_poc`)
 
 Key settings:
-- `CONFIG_TRAINING_MODE=TRAINING_MODE_OVERFIT_POC`
+- `CONFIG_TRAINING_MODE=TRAINING_MODE_OVERFIT_POC` (forces `CONFIG_SPLIT_MODE=SPLIT_MODE_OVERFIT_POC`)
 - `CONFIG_OVERFIT_POC_NUM_EXAMPLES=16`
 - `CONFIG_OVERFIT_POC_SELECTION_MODE=FIRST_N`
 - `CONFIG_GLOBAL_SEED=42`
@@ -2133,7 +3128,7 @@ When `CONFIG_TRAINING_MODE=TRAINING_MODE_OVERFIT_POC`, additional per-eval metri
 | `tiny_train_correctness_rate` | Fraction of tiny-set examples answered correctly |
 | `tiny_train_validity_rate` | Fraction of tiny-set examples producing a valid DAG |
 | `tiny_train_depth_mean` | Mean DAG depth across tiny-set examples |
-| `tiny_dev_correctness_rate` | Same metrics on dev set (equals train set in default PoC config) |
+| `tiny_dev_correctness_rate` | Same metrics on validation set (equals train set in overfit-PoC mode) |
 
 ### 14. Training Statistics Collection
 
@@ -2141,7 +3136,8 @@ When `CONFIG_TRAINING_MODE=TRAINING_MODE_OVERFIT_POC`, additional per-eval metri
 
 - **Append-only JSONL:** Per-step and per-eval files are append-only. Each line is a self-contained JSON object. If training crashes, all metrics up to the last flush are preserved.
 - **Periodic flush:** JSONL files are flushed every `CONFIG_TRAIN_STATS_FLUSH_EVERY_STEPS` steps to balance I/O overhead with crash resilience.
-- **Resume-safe:** When resuming training, new metrics are appended to existing JSONL files. The summary JSON is recomputed from the full JSONL at end of run.
+- **Resume-safe:** When resuming training, new metrics are **appended** to existing JSONL files — existing entries are never overwritten or truncated. On resume, `train_stats.py` opens the JSONL files in append mode. If the last line of the existing JSONL has a `global_step` greater than or equal to the resume step (indicating a partial write from a crash), a warning is logged but the file is not modified — new entries will start from the next step. Duplicate `global_step` values in the JSONL are tolerated during append but deduplicated (last-wins) when the end-of-run summary JSON is computed. The summary JSON is always recomputed from the **entire** JSONL history (pre-resume + post-resume) at end of run, ensuring it covers the full training trajectory.
+- **Curves resume:** On resume, `curves.py` opens existing `.tsv` data files in append mode. New data points continue from the restored `global_step`. If TSV files are missing but the per-step JSONL exists, `curves.py` reconstructs the TSV from the JSONL before appending new points. TeX files are regenerated from the updated TSV on the next update cycle. This ensures learning curve PDFs reflect the full run history (pre-crash + resumed) without manual intervention.
 - **Consistent across baselines:** The same statistics are collected regardless of training mode (GRPO or overfit PoC).
 
 #### 14b. Per-Step JSONL (`CONFIG_TRAIN_STATS_PER_STEP_JSONL`)
@@ -2196,22 +3192,22 @@ One JSON line per optimizer step. Fields:
 
 #### 14c. Per-Eval JSONL (`CONFIG_TRAIN_STATS_PER_EVAL_JSONL`)
 
-One JSON line per evaluation round. Fields:
+One JSON line per evaluation round. Evaluation is performed on the **validation split only** under no-gradient inference mode. No optimizer updates are derived from these metrics. If the validation split is empty, no eval records are written.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `global_step` | int | Step at which eval was triggered |
 | `epoch` | float | Current epoch |
-| `eval_reward_mean` | float | Mean reward on dev set |
-| `eval_correctness_rate` | float | Fraction of dev examples answered correctly |
-| `eval_validity_rate` | float | Fraction of dev examples producing valid DAG |
-| `eval_depth_mean` | float | Mean DAG depth on dev set |
-| `eval_invalid_rate` | float | Fraction of dev examples with invalid DAG |
-| `eval_parse_success_rate` | float | Fraction of dev completions that parsed as JSON |
+| `eval_reward_mean` | float | Mean reward on validation set |
+| `eval_correctness_rate` | float | Fraction of validation examples answered correctly |
+| `eval_validity_rate` | float | Fraction of validation examples producing valid DAG |
+| `eval_depth_mean` | float | Mean DAG depth on validation set |
+| `eval_invalid_rate` | float | Fraction of validation examples with invalid DAG |
+| `eval_parse_success_rate` | float | Fraction of validation completions that parsed as JSON |
 | `tiny_train_correctness_rate` | float \| null | Overfit-PoC only: correctness on tiny train set |
 | `tiny_train_validity_rate` | float \| null | Overfit-PoC only: validity on tiny train set |
 | `tiny_train_depth_mean` | float \| null | Overfit-PoC only: depth on tiny train set |
-| `tiny_dev_correctness_rate` | float \| null | Overfit-PoC only: correctness on tiny dev set |
+| `tiny_dev_correctness_rate` | float \| null | Overfit-PoC only: correctness on tiny validation set (equals train set in overfit-PoC) |
 | `wallclock_sec` | float | Seconds since training start |
 
 #### 14d. End-of-Run Summary JSON (`CONFIG_TRAIN_STATS_FILE`)
@@ -2369,7 +3365,7 @@ If `CONFIG_TRAIN_CURVES_KEEP_LAST_N_POINTS > 0`, only the last N rows are kept (
 
 #### 15d. TeX Template
 
-Each `.tex` file is a standalone PGFPlots document parameterized by metric name, title, y-axis label, and data path. Template (generated by `curves.py`):
+Each `.tex` file is a standalone PGFPlots document parameterized by metric name, title, y-axis label, and data path. `curves.py` renders each `.tex` file from a **Jinja2 template** with **absolute paths** to the `.tsv` data files so that compilation works correctly from any working directory (including the ephemeral temp directory used by `tex_compile.py`). Jinja2 replaces manual string formatting for TeX generation, providing cleaner template logic and better escaping. Template (rendered by `curves.py` via Jinja2):
 
 ````
 \documentclass[tikz,border=5pt]{standalone}
@@ -2388,25 +3384,25 @@ Each `.tex` file is a standalone PGFPlots document parameterized by metric name,
   legend pos=south east,
   line width=0.8pt,
 ]
-\addplot[blue, mark=none] table[x=step, y=value, col sep=tab] {../data/reward_mean.tsv};
+\addplot[blue, mark=none] table[x=step, y=value, col sep=tab] {/workspace/AixelAsk/nlp_project/output/train/curves/data/reward_mean.tsv};
 \addlegendentry{Train}
-\addplot[red, mark=*, mark size=1.5pt] table[x=step, y=value, col sep=tab] {../data/eval_reward_mean.tsv};
+\addplot[red, mark=*, mark size=1.5pt] table[x=step, y=value, col sep=tab] {/workspace/AixelAsk/nlp_project/output/train/curves/data/eval_reward_mean.tsv};
 \addlegendentry{Eval}
 \end{axis}
 \end{tikzpicture}
 \end{document}
 ````
 
-For single-metric (non-family) files, only one `\addplot` is generated. The `_family.tex` files overlay train + eval curves on the same axes as shown above.
+The paths above are examples; `curves.py` fills in the resolved absolute path to `CONFIG_TRAIN_CURVES_DIR/data/<metric>.tsv` for each metric. For single-metric (non-family) files, only one `\addplot` is generated. The `_family.tex` files overlay train + eval curves on the same axes as shown above.
 
 #### 15e. Update and Compile Cadence
 
 - **Update TSV + regenerate TeX:** Every `CONFIG_TRAIN_CURVES_UPDATE_EVERY_STEPS` optimizer steps, `curves.py` appends new data points to all `.tsv` files and regenerates all `.tex` files from the template.
 - **Compile TeX → PDF:** Every `CONFIG_TRAIN_CURVES_COMPILE_EVERY_STEPS` optimizer steps, `tex_compile.py` compiles all `.tex` files to PDF.
 - **Compile at end:** If `CONFIG_TRAIN_CURVES_COMPILE_AT_END=y`, all curves are compiled once at end of training regardless of step count.
-- **Compile command:** If `CONFIG_TRAIN_CURVES_LATEXMK=y`: `latexmk -pdf -<engine> -output-directory=../pdf/ <file>.tex` (run from `tex/` directory). If `n`: `<engine> -interaction=nonstopmode -output-directory=../pdf/ <file>.tex`.
+- **Compile command:** For each `.tex` file, `tex_compile.py` creates a temporary working directory under `CONFIG_EPHEMERAL_TMPDIR` (Container disk), copies the `.tex` file into it, and runs the compiler there. If `CONFIG_TRAIN_CURVES_LATEXMK=y`: `latexmk -pdf -<engine> -output-directory=<tmpdir> <file>.tex`. If `n`: `<engine> -interaction=nonstopmode -output-directory=<tmpdir> <file>.tex`. On success, the resulting PDF is copied from `<tmpdir>` to persistent `CONFIG_TRAIN_CURVES_DIR/pdf/`. The temp directory is then cleaned up. No final artifact is left only in `/tmp`.
 - **Timeout:** Each compilation is killed after `CONFIG_TRAIN_CURVES_PDFLATEX_TIMEOUT_SEC` seconds.
-- **Failure handling:** Compilation failures are captured in `manifests/compile_status.json` (per-file: `{"file": "reward_mean.tex", "success": false, "error": "...", "timestamp": "..."}`) and logged at WARNING level. Training **never** crashes due to TeX compilation failure.
+- **Failure handling:** Compilation failures are captured in persistent `CONFIG_TRAIN_CURVES_DIR/manifests/compile_status.json` (per-file: `{"file": "reward_mean.tex", "success": false, "error": "...", "timestamp": "..."}`) and logged at WARNING level. Training **never** crashes due to TeX compilation failure.
 
 #### 15f. `manifests/metrics_manifest.json`
 
@@ -2426,11 +3422,13 @@ Written at startup and updated on each curves update. Lists all tracked metrics:
 
 #### 16a. Dispatch
 
-`src/main.py` checks `CONFIG_ENABLE_TRAINING`:
-- If `n` (default): dispatch to `pipeline.run(config)` (inference/evaluation, as before).
-- If `y`: dispatch to `src.training.train_main.run(config)`.
+Training and inference use **separate entrypoints** — `src/main.py` does not check `CONFIG_ENABLE_TRAINING` and does not dispatch to training:
 
-Alternatively, training can be invoked directly: `python -m src.training.train_main --config .config`. This bypasses the `CONFIG_ENABLE_TRAINING` check and always runs training.
+- **Inference/evaluation:** `python -m src.main --config .config` (`make run`, `make run-baseline`, `make run-baseline-fewshot-ph-ext`). Always runs the inference pipeline on the **test split only**.
+- **Training:** `python -m src.training.train_main --config .config` (`make train`, `make train-grpo`, `make train-overfit-poc`, `make resume-train`). Always runs the training loop.
+- **Post-training test evaluation:** `python -m src.training.test_main --config .config` (`make test-trained`, `make test-trained-best`, `make test-trained-latest`). Evaluates a trained checkpoint on the **test split only**.
+
+`CONFIG_ENABLE_TRAINING` is used by `config.py` for validation rules (e.g. empty train split is an error only when `CONFIG_ENABLE_TRAINING=y`) but is not checked by `src/main.py` for dispatch.
 
 #### 16b. Startup Sequence
 
@@ -2447,33 +3445,135 @@ train_main.run(config)
   │       ├── Set numpy.random.seed(training_seed)
   │       └── Write resolved_seeds.json
   ├── 4. Write reward_config.json
-  ├── 5. Create train/dev split (split_utils.py or tiny_overfit_poc.py)
+  ├── 5. Create train/dev split (split_utils.py, dispatch on CONFIG_SPLIT_MODE)
   ├── 6. Build model + tokenizer (lora_factory.py)
-  │       ├── If --resume: load adapter from checkpoint, load optimizer state
-  │       └── Otherwise: fresh LoRA adapters
-  ├── 7. Create reference model (frozen deep copy for KL)
-  ├── 8. Initialize train_stats (train_stats.py)
-  ├── 9. Initialize curves (curves.py)
-  │       ├── Create directory structure
-  │       ├── Write metrics_manifest.json
+  ├── 7. Define reward_func, build GRPOConfig, create GRPOTrainer
+  │       └── Register: StatsCallback, CurvesCallback, MetadataCallback
+  ├── 8. Initialize curves directory (curves.py)
+  │       ├── Create directory structure + metrics_manifest.json
   │       └── Generate initial (empty) TeX files
-  ├── 10. Run GRPO → grpo_trainer.py
-  │        └── Inside the loop, periodically:
-  │            ├── Eval on dev set
-  │            ├── Save checkpoint (checkpointing.py)
-  │            ├── Update curves (curves.py)
-  │            └── Compile curves (tex_compile.py)
-  ├── 11. Final stats flush → train_stats_summary.json
-  ├── 12. Final curves compilation (all PDFs)
-  └── 13. Optional adapter merge + export
+  ├── 9. trainer.train(resume_from_checkpoint=path) if --resume, else trainer.train()
+  │       TRL handles internally: generation, rewards via reward_func, loss, optimizer
+  │       Callbacks fire periodically:
+  │            ├── StatsCallback → JSONL + summary
+  │            ├── CurvesCallback → TSV + TeX updates + PDF compilation
+  │            └── MetadataCallback → checkpoint_metadata.json, latest symlink, best copy
+  ├── 10. Final stats flush → train_stats_summary.json
+  ├── 11. Final curves compilation (all PDFs)
+  └── 12. Optional adapter merge + export
 ```
 
 #### 16c. Shutdown
 
-- **Normal exit:** Steps 11–13 above.
-- **Interrupt (Ctrl+C / SIGTERM):** `train_main` registers an `atexit` handler and a `signal` handler that:
-  1. Flush all pending stats to JSONL.
-  2. Save a "latest" checkpoint.
-  3. Attempt one final curves compilation (best-effort).
-  4. Log "Training interrupted at step N".
-- **OOM / crash:** Per-step JSONL is flushed every `CONFIG_TRAIN_STATS_FLUSH_EVERY_STEPS` steps, so at most that many steps of data are lost. Checkpoints are saved every `CONFIG_GRPO_SAVE_EVERY_STEPS` steps. Resume with `make resume-train`.
+- **Normal exit:** Steps 10–12 above. `MetadataCallback.on_train_end()` saves a `final/` checkpoint. If `CONFIG_TRAIN_SAVE_MERGED_ADAPTER=y`, a `merged/` checkpoint is also created (inference-ready weights only, no optimizer/RNG).
+- **Interrupt (Ctrl+C / SIGTERM):** Trainer's built-in signal handling attempts a checkpoint save. `MetadataCallback.on_save()` updates the `latest` symlink and `checkpoint_index.json`. `StatsCallback` flushes pending JSONL. One final curves compilation is attempted (best-effort). This is best-effort — SIGKILL cannot be caught.
+- **OOM / crash:** Per-step JSONL is flushed by `StatsCallback` every `CONFIG_TRAIN_STATS_FLUSH_EVERY_STEPS` steps, so at most that many steps of data are lost. Checkpoints are saved every `CONFIG_GRPO_SAVE_EVERY_STEPS` steps by Trainer. Resume with `make resume-train` — uses `trainer.train(resume_from_checkpoint=...)` to restore all state.
+
+### 17. Runpod Storage Layout
+
+This module is designed to run on Runpod (or similar cloud GPU providers) where storage is split into two tiers:
+
+#### 17a. Volume Disk vs. Container Disk
+
+| Tier | Mount point | Persistence | Use |
+|------|-------------|-------------|-----|
+| **Volume disk** | `/workspace` | Survives Pod stop/start/restart; persists until the Volume is deleted | All valuable artifacts: repo, models, datasets, checkpoints, outputs, stats, curves, caches, `.config` |
+| **Container disk** | Everything outside `/workspace` (e.g. `/root`, `/home`, `/tmp`, system dirs) | Lost on every Pod stop/terminate; rebuilt from the Docker image on each start | Temporary/scratch files only: TeX compile intermediaries, transient download staging, system temp files |
+
+**Rule:** The implementation must never write important artifacts to Container disk. All default paths in Kconfig resolve under `CONFIG_PERSISTENT_ROOT` (default `/workspace/AixelAsk/nlp_project`), which lives on the Volume disk.
+
+#### 17b. What Lives Where
+
+**Volume disk (`/workspace`) — persistent:**
+
+| Artifact | Default path | Kconfig symbol |
+|----------|-------------|----------------|
+| Project repo | `/workspace/AixelAsk/nlp_project/` | `CONFIG_PERSISTENT_ROOT` |
+| `.config` | `<project_root>/.config` | — |
+| HF cache root (`HF_HOME`) | `/workspace/.cache/huggingface` | `CONFIG_MODEL_CACHE_DIR` |
+| Model hub cache (snapshots) | `/workspace/.cache/huggingface/hub/` | Derived: `$HF_HOME/hub/` |
+| Embedding cache | `<project_root>/cache/table_embeddings.jsonl` | `CONFIG_EMBEDDING_CACHE` |
+| Inference results | `<project_root>/output/results.jsonl` | `CONFIG_RESULT_FILE` |
+| DAG stats | `<project_root>/output/dag_stats.json` | `CONFIG_DAG_STATS_FILE` |
+| Run log | `<project_root>/output/run.log` | `CONFIG_LOG_FILE` |
+| Training checkpoints | `<TRAIN_OUTPUT_DIR>/checkpoints/` (step-NNNNNN/, latest→, best/, final/, merged/, checkpoint_index.json) | Derived from `CONFIG_TRAIN_OUTPUT_DIR`; see §12d-i for directory layout |
+| Training stats JSONL | `<TRAIN_OUTPUT_DIR>/train_steps.jsonl` | Derived (or `CONFIG_TRAIN_STATS_PER_STEP_JSONL` if explicitly set) |
+| Training summary | `<TRAIN_OUTPUT_DIR>/train_stats_summary.json` | Derived (or `CONFIG_TRAIN_STATS_FILE` if explicitly set) |
+| Learning curve PDFs | `<TRAIN_OUTPUT_DIR>/curves/pdf/` | Derived (or `CONFIG_TRAIN_CURVES_DIR` if explicitly set) |
+| Seed/reward manifests | `<TRAIN_OUTPUT_DIR>/resolved_seeds.json` | Derived from `CONFIG_TRAIN_OUTPUT_DIR` |
+| Merged adapter export | `<TRAIN_OUTPUT_DIR>/checkpoints/merged/` | Derived from `CONFIG_TRAIN_OUTPUT_DIR` |
+| Trained-model test results | `<TRAIN_OUTPUT_DIR>/test_best/results.jsonl` (or `test_latest/`, `test_merged/`, `test_explicit/`) | Derived from `CONFIG_TEST_TRAINED_OUTPUT_DIR` (or `CONFIG_TRAIN_OUTPUT_DIR` + source) |
+| Trained-model test DAG stats | `<TRAIN_OUTPUT_DIR>/test_best/dag_stats.json` | Derived from `CONFIG_TEST_TRAINED_DAG_STATS_FILE` |
+| Trained-model test summary | `<TRAIN_OUTPUT_DIR>/test_best/test_eval_summary.json` | Always derived from `CONFIG_TEST_TRAINED_OUTPUT_DIR` |
+| SGLang PID file | `<project_root>/.sglang.pid` | — |
+| Datasets | `/workspace/AixelAsk/AixelAsk/dataset/` | `CONFIG_TRAIN_DATASET_PATH` etc.; when `SPLIT_MODE_EXPLICIT_INDICES`, resolved by `dataset_registry.py` |
+
+**Container disk (`/tmp`) — ephemeral:**
+
+| Artifact | Path | Notes |
+|----------|------|-------|
+| TeX compile scratch | `/tmp/tex_compile_*` | Intermediate `.aux`, `.log` files from pdflatex; discarded after compilation |
+| Transient download staging | `/tmp/hf_download_*` | Used only if a download needs temp staging before moving to persistent cache |
+| Python `__pycache__` | Various | Rebuilt automatically on next import |
+| Python pip cache | `/root/.cache/pip` | Ephemeral; rebuilt on `pip install`. Distinct from the persistent HF model cache under `/workspace` |
+
+#### 17c. `config.py` Path Resolution
+
+At startup, `config.py`:
+1. Computes `PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))` — the immutable `nlp_project/` directory on disk. This never changes regardless of Kconfig settings.
+1a. Resolves `CONFIG_PERSISTENT_ROOT` to an absolute path (default `/workspace/AixelAsk/nlp_project`).
+2. **Derives empty training paths** from `CONFIG_TRAIN_OUTPUT_DIR`: if `CONFIG_TRAIN_STATS_FILE`, `CONFIG_TRAIN_STATS_PER_STEP_JSONL`, `CONFIG_TRAIN_STATS_PER_EVAL_JSONL`, or `CONFIG_TRAIN_CURVES_DIR` are empty, derives them as `<TRAIN_OUTPUT_DIR>/train_stats_summary.json`, `<TRAIN_OUTPUT_DIR>/train_steps.jsonl`, `<TRAIN_OUTPUT_DIR>/train_evals.jsonl`, `<TRAIN_OUTPUT_DIR>/curves` respectively. Checkpoints are always at `<TRAIN_OUTPUT_DIR>/checkpoints/`, manifests at `<TRAIN_OUTPUT_DIR>/resolved_seeds.json` and `<TRAIN_OUTPUT_DIR>/reward_config.json`.
+2a. **Derives empty test-trained paths** from `CONFIG_TRAIN_OUTPUT_DIR` and `CONFIG_TEST_TRAINED_CHECKPOINT_SOURCE`: if `CONFIG_TEST_TRAINED_OUTPUT_DIR` is empty, derives it as `<TRAIN_OUTPUT_DIR>/test_<source>/` (e.g. `test_best/`). If `CONFIG_TEST_TRAINED_RESULT_FILE` is empty, derives it as `<TEST_TRAINED_OUTPUT_DIR>/results.jsonl`. If `CONFIG_TEST_TRAINED_DAG_STATS_FILE` is empty, derives it as `<TEST_TRAINED_OUTPUT_DIR>/dag_stats.json`. `test_eval_summary.json` is always at `<TEST_TRAINED_OUTPUT_DIR>/test_eval_summary.json`.
+3. **Resolves relative persistent artifact paths** by prepending `CONFIG_PERSISTENT_ROOT`: `CONFIG_MODEL_CACHE_DIR`, `CONFIG_RESULT_FILE`, `CONFIG_EMBEDDING_CACHE`, `CONFIG_LOG_FILE`, `CONFIG_DAG_STATS_FILE`, `CONFIG_LLM_CALLS_SIDEFILE`, `CONFIG_TRAIN_OUTPUT_DIR`, `CONFIG_TRAIN_STATS_FILE`, `CONFIG_TRAIN_STATS_PER_STEP_JSONL`, `CONFIG_TRAIN_STATS_PER_EVAL_JSONL`, `CONFIG_TRAIN_CURVES_DIR`, `CONFIG_TRAIN_CHECKPOINT_PATH`, `CONFIG_OVERFIT_POC_INDICES_FILE`, `CONFIG_TEST_TRAINED_OUTPUT_DIR`, `CONFIG_TEST_TRAINED_RESULT_FILE`, `CONFIG_TEST_TRAINED_DAG_STATS_FILE`, `CONFIG_TEST_TRAINED_CHECKPOINT_PATH`.
+3a. **Resolves relative prompt/vendored-file paths** by prepending `PROJECT_DIR`: `CONFIG_FINAL_REASONING_PROMPT`, `CONFIG_NOPLAN_REASONING_PROMPT`, `CONFIG_ROW_PROMPT`, `CONFIG_COL_PROMPT`, `CONFIG_SCHEMA_LINKING_PROMPT`, `CONFIG_PLAN_PROMPT`, and the few-shot file list from `CONFIG_FEWSHOT_VARIANT`. `.sglang.pid` is also placed under `PROJECT_DIR`.
+4. For dataset paths (`CONFIG_INFERENCE_DATASET_PATH`, `CONFIG_TRAIN_DATASET_PATH`, `CONFIG_TRAIN_DEV_DATASET_PATH`): resolves relative paths against the AixelAsk repo root (`/workspace/AixelAsk/AixelAsk`), not `CONFIG_PERSISTENT_ROOT`, since datasets ship with the upstream repo. Absolute paths are used as-is. Any locally staged copies must go under `/workspace`. When `CONFIG_SPLIT_MODE=SPLIT_MODE_EXPLICIT_INDICES`, canonical dataset paths are resolved by `dataset_registry.py` against the same repo root; the above symbols are not used for data loading.
+5. **Parses split mode and index lists** (see `config.py` split mode parsing above). When `SPLIT_MODE_EXPLICIT_INDICES`, validates syntax, bounds, and cross-split disjointness.
+6. Creates parent directories (`os.makedirs(..., exist_ok=True)`) for all output paths.
+7. Sets `HF_HOME` and `TRANSFORMERS_CACHE` env vars to the resolved `CONFIG_MODEL_CACHE_DIR` before any HF library import. All HF libraries then use `$HF_HOME/hub/` as the model hub cache. Code must not pass `cache_dir` explicitly to `snapshot_download`, `from_pretrained`, or `SentenceTransformer`; the env var ensures every consumer — including the SGLang subprocess — resolves the same cache path.
+8. Sets `TMPDIR` to `CONFIG_EPHEMERAL_TMPDIR` for any library that respects it.
+
+This ensures that even if the user only sets `CONFIG_TRAIN_OUTPUT_DIR` via `make menuconfig`, all training artifacts (stats, curves, checkpoints, manifests) are placed under that directory on the persistent Volume disk.
+
+#### 17d. Recommended Runpod Disk Sizing
+
+| Setup | Container disk | Volume disk | Notes |
+|-------|---------------|-------------|-------|
+| **Minimal (short experiments)** | 40 GB | 100 GB | Fits one model cache + a few inference runs; tight for training checkpoints |
+| **Recommended** | 60 GB | 150 GB | Comfortable for model cache + multiple inference baselines + one training run with checkpoints |
+| **Heavy (many checkpoints / repeated runs)** | 60 GB | 200 GB | Multiple training runs, many checkpoints, large datasets |
+
+**Storage budget breakdown (Volume disk):**
+
+| Component | Approximate size |
+|-----------|-----------------|
+| Mistral-7B-Instruct model cache (4-bit) | ~4 GB |
+| Mistral-7B-Instruct model cache (full fp16, for SGLang) | ~14 GB |
+| nomic-embed-text-v1 model cache | ~0.5 GB |
+| Python environment (if installed on Volume) | ~5–10 GB |
+| Project repo + datasets | ~2–5 GB |
+| Embedding cache | ~0.5–2 GB |
+| Inference outputs (results JSONL + DAG stats) | <1 GB per run |
+| Training checkpoints (LoRA adapter only) | ~100–200 MB per checkpoint |
+| Training checkpoints (merged full model) | ~14 GB per merged export |
+| Training stats JSONL + curves TSV/TeX/PDF | <500 MB per run |
+| Logs | <500 MB |
+
+The main driver of Volume disk usage is **checkpoint accumulation** (especially if `CONFIG_TRAIN_SAVE_MERGED_ADAPTER=y`) and **model cache** (the full-precision model for SGLang is ~14 GB). For adapter-only checkpoints, disk usage is modest (~200 MB each).
+
+#### 17e. `tex_compile.py` Ephemeral Scratch
+
+When compiling TeX files, `tex_compile.py` uses `CONFIG_EPHEMERAL_TMPDIR` (default `/tmp`) for all intermediate compile artifacts:
+
+- Auxiliary files (`.aux`, `.log`, `.fls`, `.synctex.gz`) are created in a temporary working directory under `CONFIG_EPHEMERAL_TMPDIR`.
+- Temp working directories are cleaned up after each compilation attempt.
+
+Final artifacts are always written to persistent Volume disk paths:
+
+- `.pdf` files → `CONFIG_TRAIN_CURVES_DIR/pdf/` (persistent).
+- `compile_status.json` → `CONFIG_TRAIN_CURVES_DIR/manifests/` (persistent).
+
+**Invariant:** `tex_compile.py` must **never** leave final PDFs or status files only in `/tmp`. If compilation succeeds, the PDF is moved/copied from the temp dir to the persistent output directory before the temp dir is cleaned up. If compilation fails, the failure is recorded in `compile_status.json` (persistent) and logged; no PDF is produced but existing PDFs from previous compilations are preserved.
+
+#### 17f. SGLang Server Runtime Files
+
+The SGLang server process writes its PID to `<CONFIG_PERSISTENT_ROOT>/.sglang.pid` (Volume disk, so it survives brief restarts). SGLang's internal runtime scratch (CUDA memory, temp files) uses Container disk implicitly. The server log output is captured in `CONFIG_LOG_FILE` (Volume disk).

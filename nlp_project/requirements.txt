@@ -1,0 +1,40 @@
+# nlp_project dependencies
+# Library-first design: prefer mature libraries; custom code only for AixelAsk-specific glue.
+
+# === Inference stack ===
+sglang[all]
+sentence-transformers>=4.0.0
+openai>=1.52.0
+tiktoken>=0.8.0
+scikit-learn>=1.5.0
+scipy>=1.13.0,<1.15.0
+
+# === Core ML ===
+torch>=2.0.0,<2.6.0
+transformers>=4.40.0,<4.48.0
+numpy>=1.26.0,<2.0.0
+pandas>=2.2.0
+
+# === Training (GRPO via TRL + LoRA/QLoRA via PEFT) ===
+trl>=0.12.0
+peft>=0.13.0
+bitsandbytes>=0.44.0
+accelerate>=1.0.0
+datasets>=3.0.0
+
+# === Templating (prompts + TeX curves) ===
+jinja2>=3.1.0
+
+# === Console UX ===
+rich>=13.0.0
+tqdm>=4.66.0
+
+# === Config ===
+kconfiglib>=14.1.0
+
+# === Utilities ===
+huggingface_hub>=0.23.0
+requests>=2.31.0
+
+# === Testing ===
+pytest>=7.0.0
