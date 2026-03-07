@@ -1,4 +1,4 @@
-sglang[all]
+# sglang[all] must be installed separately: pip install "sglang[all]" --no-deps
 sentence-transformers>=4.0.0
 kconfiglib>=14.1.0
 huggingface_hub>=0.23.0
