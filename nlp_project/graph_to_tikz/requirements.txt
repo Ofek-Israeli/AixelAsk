@@ -1,3 +1,4 @@
 # graph_to_tikz uses only the Python standard library (argparse, json, math, re, subprocess, pathlib, typing, dataclasses).
 # No third-party Python packages required.
-# For PDF output, pdflatex (e.g. texlive-latex-base) must be installed on the system.
+# For PDF output, pdflatex must be installed on the system, e.g.:
+#   apt-get update && apt-get install -y texlive-latex-base texlive-latex-extra
