@@ -1,0 +1,49 @@
+menu "DAG Statistics"
+
+config DAG_STATS_ENABLE
+	bool "Enable DAG statistics collection"
+	default y
+	help
+	  Master switch: collect DAG metrics during the run.
+
+config DAG_STATS_FILE
+	string "DAG stats output file"
+	default "output/dag_stats.json"
+	depends on DAG_STATS_ENABLE
+	help
+	  Path where the end-of-run summary is written (JSON). A CSV sidecar
+	  is written to the same basename with .csv extension.
+
+config DAG_STATS_INCLUDE_FAILED
+	bool "Include failed items in stats"
+	default y
+	depends on DAG_STATS_ENABLE
+	help
+	  Include items where DAG generation failed (all retries exhausted /
+	  fell back to no-plan) in the summary statistics.
+
+config DAG_STATS_WRITE_PER_ITEM
+	bool "Write per-item metrics"
+	default n
+	depends on DAG_STATS_ENABLE
+	help
+	  Stream per-item metrics to a JSONL sidecar
+	  (<basename>_per_item.jsonl) as each item completes.
+
+config LOG_EXECUTOR_STATS
+	bool "Include executor telemetry"
+	default y
+	depends on DAG_STATS_ENABLE
+	help
+	  Include per-item executor telemetry (frontier widths, wave counts,
+	  concurrency achieved) in dag_stats output.
+
+config DAG_STATS_VALIDITY_ERRORS
+	bool "Include validity error breakdown"
+	default y
+	depends on DAG_STATS_ENABLE
+	help
+	  Include the validity error breakdown (counts and fractions by
+	  error category) in the end-of-run summary.
+
+endmenu

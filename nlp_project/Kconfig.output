@@ -1,0 +1,99 @@
+menu "Output / Logging Configuration"
+
+config PERSISTENT_ROOT
+	string "Persistent output root directory"
+	default "/workspace/AixelAsk/nlp_project"
+	help
+	  Root for all persistent output/cache/checkpoint artifacts. Must be
+	  on the Runpod Volume disk. All relative output/cache/checkpoint
+	  paths are resolved relative to this.
+
+config EPHEMERAL_TMPDIR
+	string "Ephemeral temp directory"
+	default "/tmp"
+	help
+	  Root for temporary/scratch files that need not survive Pod restarts
+	  (TeX compile scratch, transient downloads).
+
+config RESULT_FILE
+	string "Result file path"
+	default "output/results.jsonl"
+	help
+	  Where final results are written (resolved relative to
+	  PERSISTENT_ROOT).
+
+config EMBEDDING_CACHE
+	string "Embedding cache path"
+	default "cache/table_embeddings.jsonl"
+	help
+	  Precomputed embedding cache (persistent on Volume disk; resolved
+	  relative to PERSISTENT_ROOT).
+
+config LOG_FILE
+	string "Log file path"
+	default "output/run.log"
+	help
+	  Log file path (resolved relative to PERSISTENT_ROOT).
+
+choice LOG_LEVEL
+	prompt "Log level"
+	default LOG_LEVEL_INFO
+	help
+	  Logging verbosity level.
+
+config LOG_LEVEL_DEBUG
+	bool "DEBUG"
+
+config LOG_LEVEL_INFO
+	bool "INFO"
+
+config LOG_LEVEL_WARNING
+	bool "WARNING"
+
+config LOG_LEVEL_ERROR
+	bool "ERROR"
+
+endchoice
+
+config LOG_LLM_PROMPTS
+	bool "Log LLM prompts"
+	default n
+	select LOG_LLM_RESPONSES
+	help
+	  When enabled, store the exact prompt text sent to the LLM for each
+	  call inside the results JSONL. Also logs prompts at DEBUG level.
+	  Automatically enables LOG_LLM_RESPONSES.
+
+config LOG_LLM_RESPONSES
+	bool "Log LLM responses"
+	default n
+	help
+	  When enabled, store the raw LLM response text in each call record.
+	  Automatically enabled when LOG_LLM_PROMPTS=y; can also be enabled
+	  independently.
+
+config LOG_LLM_CALLS_MAX_CHARS
+	int "Max chars per LLM prompt/response field"
+	default 200000
+	help
+	  Maximum character length for any single prompt or response_text
+	  field in the JSONL. Strings exceeding this are truncated. Set to
+	  0 for unlimited.
+
+config LOG_LLM_CALLS_PER_ITEM
+	bool "Embed llm_calls in per-item results"
+	default n
+	help
+	  When enabled, embed the llm_calls array inside each per-item
+	  result record in RESULT_FILE. A CallRecorder is created if any
+	  call-capture artifact is enabled.
+
+config LLM_CALLS_SIDEFILE
+	string "LLM calls sidefile path"
+	default ""
+	help
+	  If non-empty, write a separate JSONL file with one record per LLM
+	  call (flat, not nested). Each record includes item index and
+	  question for join-ability.
+
+endmenu

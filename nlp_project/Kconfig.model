@@ -1,0 +1,69 @@
+menu "Model Configuration"
+
+config INFERENCE_MODEL
+	string "Inference LLM (HF repo ID)"
+	default "mistralai/Mistral-7B-Instruct-v0.3"
+	help
+	  HF repo ID for the inference LLM. At runtime,
+	  download_models.resolve_model_path(config) resolves this +
+	  INFERENCE_MODEL_REVISION to a local snapshot directory path,
+	  and that local path is passed to SGLang --model-path,
+	  lora_factory.build_model_and_tokenizer(), and any other consumer.
+
+config INFERENCE_MODEL_REVISION
+	string "Inference model HF revision"
+	default "main"
+	help
+	  HF revision / commit SHA / tag. Used by snapshot_download to pin
+	  a specific model version. After download, the resolved local
+	  snapshot path is used everywhere.
+
+config EMBEDDING_MODEL
+	string "Embedding model name"
+	default "nomic-ai/nomic-embed-text-v1"
+	help
+	  SentenceTransformer(...) model name for embeddings.
+
+config MODEL_CACHE_DIR
+	string "Hugging Face cache root directory"
+	default "/workspace/.cache/huggingface"
+	help
+	  Set as HF_HOME and TRANSFORMERS_CACHE env vars at startup. All HF
+	  libraries use $HF_HOME/hub/ as the model hub cache. Must be on
+	  the persistent Volume disk so models survive Pod restarts.
+
+config TRUST_REMOTE_CODE
+	bool "Trust remote code for embedding model"
+	default y
+	help
+	  Pass --trust-remote-code for nomic and other models that require
+	  executing code from the HF Hub.
+
+choice NOMIC_PREFIX_MODE
+	prompt "Nomic embedding prefix mode"
+	default NOMIC_PREFIX_AUTO
+	help
+	  How the embedding client prepends search_query: / search_document:
+	  prefixes to input text before encoding.
+
+config NOMIC_PREFIX_AUTO
+	bool "AUTO — heuristic prefix selection"
+	help
+	  Inputs containing ?, starting with "question" (case-insensitive),
+	  or shorter than 40 characters get search_query: prefix; everything
+	  else gets search_document: prefix.
+
+config NOMIC_PREFIX_ALWAYS_QUERY
+	bool "ALWAYS_QUERY — always prepend search_query:"
+
+config NOMIC_PREFIX_ALWAYS_DOCUMENT
+	bool "ALWAYS_DOCUMENT — always prepend search_document:"
+
+config NOMIC_PREFIX_NONE
+	bool "NONE — no prefix"
+	help
+	  Useful for non-nomic models or testing.
+
+endchoice
+
+endmenu

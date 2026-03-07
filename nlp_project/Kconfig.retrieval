@@ -1,0 +1,105 @@
+menu "Retrieval / DAG Configuration"
+
+config USE_DAG
+	bool "Use DAG-based plan (vs linear plan)"
+	default y
+	help
+	  Enable DAG-based retrieval plan generation. When disabled, a
+	  linear plan is used instead.
+
+config DAG_MAX_RETRIES
+	int "DAG generation max retries"
+	default 10
+	help
+	  max_attempts in generate_dag.py — how many times to retry DAG
+	  generation on parse/validation failure.
+
+choice DAG_PROMPT_VARIANT
+	prompt "DAG prompt template variant"
+	default DAG_PROMPT_STANDARD
+	help
+	  Selects which shipped DAG prompt template to use. Overridden if
+	  PLAN_PROMPT is set to a non-empty string.
+
+config DAG_PROMPT_STANDARD
+	bool "Standard — LLM freely chooses DAG structure"
+	help
+	  Uses prompt/get_dag.md. The LLM freely chooses DAG structure
+	  (parallel, sequential, or hybrid).
+
+config DAG_PROMPT_MIN_DEPTH_BASELINE
+	bool "Min-depth baseline — encourages shallow, parallel DAGs"
+	help
+	  Uses prompt/get_dag_min_depth.md. Identical to standard except
+	  for one added instruction line encouraging minimal-depth,
+	  maximally-parallel DAGs.
+
+endchoice
+
+config PLAN_PROMPT
+	string "Manual DAG prompt template path override"
+	default ""
+	help
+	  If non-empty, overrides DAG_PROMPT_VARIANT and uses this path
+	  verbatim as the prompt template. If empty (default), the path is
+	  resolved from DAG_PROMPT_VARIANT.
+
+choice FEWSHOT_VARIANT
+	prompt "Few-shot example set"
+	default FEWSHOT_STANDARD_ALL3
+	help
+	  Selects which set of few-shot files populates {{ fewshot }} at
+	  runtime. Independent of DAG prompt variant — the two knobs are
+	  orthogonal.
+
+config FEWSHOT_STANDARD_ALL3
+	bool "Standard — all 3 types (parallel + sequential + hybrid)"
+	help
+	  Concatenates fewshot_parallel.txt, fewshot_sequential.txt,
+	  fewshot_hybrid.txt. 6 examples total.
+
+config FEWSHOT_PARALLEL_HYBRID_EXTENDED
+	bool "Parallel + hybrid extended (no sequential)"
+	help
+	  Concatenates fewshot_parallel.txt, fewshot_hybrid.txt,
+	  fewshot_parallel_extended.txt, fewshot_hybrid_extended.txt.
+
+endchoice
+
+config FINAL_REASONING_PROMPT
+	string "Final reasoning prompt template"
+	default "prompt/final_reasoning_DAG.md"
+	help
+	  Path to the final reasoning prompt template.
+
+config NOPLAN_REASONING_PROMPT
+	string "No-plan fallback reasoning prompt"
+	default "prompt/noplan_reasoning.md"
+	help
+	  Fallback reasoning prompt used when DAG generation fails.
+
+config ROW_PROMPT
+	string "Row template prompt"
+	default "prompt/get_row_template.md"
+	help
+	  Prompt template for row retrieval.
+
+config COL_PROMPT
+	string "Column template prompt"
+	default "prompt/get_col_template.md"
+	help
+	  Prompt template for column retrieval.
+
+config SCHEMA_LINKING_PROMPT
+	string "Schema linking prompt"
+	default "prompt/prompt_schema_linking.md"
+	help
+	  Prompt template for schema linking.
+
+config NUM_SAMPLE_ROWS
+	int "Number of sample rows"
+	default 5
+	help
+	  num_samples passed to sample_table_rows for table previews.
+
+endmenu

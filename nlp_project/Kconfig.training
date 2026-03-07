@@ -1,0 +1,468 @@
+menu "Training Configuration"
+
+config ENABLE_TRAINING
+	bool "Enable training"
+	default n
+	help
+	  Master switch: when enabled, make train and make resume-train are
+	  valid targets. src/main.py does not check this flag (inference-only).
+
+choice TRAINING_MODE
+	prompt "Training algorithm"
+	default TRAINING_MODE_DISABLED
+	help
+	  Selects the training algorithm.
+
+config TRAINING_MODE_DISABLED
+	bool "Disabled"
+	help
+	  Training is disabled; ENABLE_TRAINING=n takes precedence.
+
+config TRAINING_MODE_GRPO
+	bool "GRPO — RL-based LoRA training"
+	help
+	  Run GRPO training. The base model is already instruction-tuned;
+	  LoRA adapters are trained via RL.
+
+config TRAINING_MODE_OVERFIT_POC
+	bool "Overfit PoC — small-sample proof of concept"
+	help
+	  Runs GRPO on a tiny seeded subset for rapid iteration and
+	  verification of the training pipeline.
+
+endchoice
+
+comment "Dataset / split / overfit selection (SPLIT_MODE_SEEDED_RATIO only)"
+
+config TRAIN_DATASET_PATH
+	string "Training data path"
+	default "dataset/WikiTQ-4k/train.jsonl"
+	help
+	  Path to training data (JSONL). Used only in SPLIT_MODE_SEEDED_RATIO.
+
+config TRAIN_DEV_DATASET_PATH
+	string "Explicit dev set path"
+	default ""
+	help
+	  If empty, split from training data using TRAIN_SPLIT_RATIO. Used
+	  only in SPLIT_MODE_SEEDED_RATIO.
+
+config TRAIN_USE_SEEDED_SPLIT
+	bool "Use seeded train/dev split"
+	default y
+	help
+	  When enabled and dev path is empty, create a stable seeded
+	  train/dev split. Used only in SPLIT_MODE_SEEDED_RATIO.
+
+config TRAIN_SPLIT_RATIO
+	string "Train split ratio"
+	default "0.9"
+	help
+	  Fraction of data used for training (remainder goes to dev). Parsed
+	  as float. Used only in SPLIT_MODE_SEEDED_RATIO.
+
+config TRAIN_SPLIT_SEED
+	int "Train/dev split seed"
+	default -1
+	help
+	  Seed for train/dev split RNG. -1 = inherit from GLOBAL_SEED. Used
+	  only in SPLIT_MODE_SEEDED_RATIO.
+
+config TRAIN_MAX_TRAIN_EXAMPLES
+	int "Max training examples"
+	default 0
+	help
+	  Cap on training examples. 0 = use all. Applies in all split modes
+	  after split construction.
+
+config TRAIN_MAX_DEV_EXAMPLES
+	int "Max dev examples"
+	default 0
+	help
+	  Cap on dev/validation examples. 0 = use all. Applies in all split
+	  modes after split construction.
+
+comment "Overfit PoC selection (SPLIT_MODE_OVERFIT_POC only)"
+
+config OVERFIT_POC_NUM_EXAMPLES
+	int "Overfit PoC example count"
+	default 16
+	help
+	  Number of examples for the overfit PoC subset. Used only in
+	  SPLIT_MODE_OVERFIT_POC.
+
+choice OVERFIT_POC_SELECTION_MODE
+	prompt "Overfit PoC selection mode"
+	default OVERFIT_POC_FIRST_N
+	help
+	  How to select the tiny subset. Used only in SPLIT_MODE_OVERFIT_POC.
+
+config OVERFIT_POC_FIRST_N
+	bool "First N — take the first N examples"
+
+config OVERFIT_POC_RANDOM_SEEDED
+	bool "Random seeded — sample N using GLOBAL_SEED"
+
+config OVERFIT_POC_FIXED_INDICES_FILE
+	bool "Fixed indices file — load explicit indices from a file"
+
+endchoice
+
+config OVERFIT_POC_INDICES_FILE
+	string "Overfit PoC indices file path"
+	default ""
+	depends on OVERFIT_POC_FIXED_INDICES_FILE
+	help
+	  Path to a file with explicit indices (one per line). Used only
+	  when OVERFIT_POC_SELECTION_MODE=FIXED_INDICES_FILE.
+
+comment "Training reproducibility / seeds"
+
+config GLOBAL_SEED
+	int "Global master seed"
+	default 42
+	help
+	  Master seed. All stage-specific seeds inherit from this unless
+	  overridden.
+
+config TRAINING_SEED
+	int "Training seed (PyTorch / optimizer / dropout)"
+	default -1
+	help
+	  -1 = inherit from GLOBAL_SEED.
+
+config DATALOADER_SEED
+	int "Dataloader seed (shuffling / sampling)"
+	default -1
+	help
+	  -1 = inherit from GLOBAL_SEED.
+
+config GENERATION_SEED
+	int "GRPO generation seed"
+	default -1
+	help
+	  Seed for sampling during GRPO generation. -1 = inherit from
+	  GLOBAL_SEED.
+
+config REWARD_SEED
+	int "Reward seed (reserved)"
+	default -1
+	help
+	  Seed for any stochastic reward components (currently unused).
+	  -1 = inherit from GLOBAL_SEED.
+
+config EVAL_SEED
+	int "Evaluation generation seed"
+	default -1
+	help
+	  Seed for evaluation generation. -1 = inherit from GLOBAL_SEED.
+
+config SAVE_RESOLVED_SEEDS
+	bool "Save resolved_seeds.json manifest"
+	default y
+	help
+	  When enabled, write a resolved_seeds.json manifest to
+	  TRAIN_OUTPUT_DIR at startup.
+
+comment "GRPO hyperparameters"
+
+config GRPO_ENABLE
+	bool "Enable GRPO training stage"
+	default y
+	help
+	  Enable GRPO training. Automatically enabled when training mode is
+	  GRPO or OVERFIT_POC.
+
+config GRPO_NUM_EPOCHS
+	int "GRPO epochs"
+	default 1
+	help
+	  Number of GRPO epochs over the prompt dataset. Maps to
+	  GRPOConfig.num_train_epochs.
+
+config GRPO_MAX_STEPS
+	int "GRPO max steps"
+	default 0
+	help
+	  Max GRPO steps. 0 = epoch-limited (translated to max_steps=-1
+	  in GRPOConfig). Positive value passed through directly.
+
+config GRPO_BATCH_SIZE_PROMPTS
+	int "Prompts per batch"
+	default 4
+	help
+	  Number of prompts per GRPO batch. Maps to
+	  GRPOConfig.per_device_train_batch_size.
+
+config GRPO_GROUP_SIZE
+	int "Completions per prompt (M)"
+	default 8
+	help
+	  Number of completions sampled per prompt. Maps to
+	  GRPOConfig.num_generations.
+
+config GRPO_MAX_NEW_TOKENS
+	int "Max new tokens per completion"
+	default 1024
+	help
+	  Maximum tokens generated per GRPO completion. Maps to
+	  GRPOConfig.max_completion_length.
+
+config GRPO_TEMPERATURE
+	string "GRPO sampling temperature"
+	default "0.7"
+	help
+	  Sampling temperature during GRPO generation. Parsed as float.
+
+config GRPO_TOP_P
+	string "GRPO nucleus sampling (top_p)"
+	default "0.95"
+	help
+	  Nucleus sampling p. Parsed as float. Passed via GenerationConfig.
+
+config GRPO_TOP_K
+	int "GRPO top-k sampling"
+	default 0
+	help
+	  Top-k sampling. 0 = disabled (omitted from GenerationConfig).
+
+config GRPO_CLIP_EPS
+	string "PPO clipping epsilon"
+	default "0.2"
+	help
+	  PPO-style clipping epsilon. Maps to GRPOConfig.cliprange.
+	  Parsed as float.
+
+config GRPO_KL_COEF
+	string "KL penalty coefficient"
+	default "0.05"
+	help
+	  KL penalty coefficient to reference model. Maps to
+	  GRPOConfig.beta. Parsed as float.
+
+config GRPO_LR
+	string "GRPO learning rate"
+	default "5e-5"
+	help
+	  Learning rate for GRPO. Maps to GRPOConfig.learning_rate.
+	  Parsed as float.
+
+config GRPO_GRAD_ACCUM
+	int "Gradient accumulation steps"
+	default 2
+	help
+	  Gradient accumulation steps for GRPO.
+
+config GRPO_SAVE_EVERY_STEPS
+	int "Checkpoint save interval (steps)"
+	default 50
+	help
+	  Save checkpoint every N GRPO steps. Maps to
+	  GRPOConfig.save_steps.
+
+config GRPO_EVAL_EVERY_STEPS
+	int "Evaluation interval (steps)"
+	default 25
+	help
+	  Evaluate on validation set every N GRPO steps (no-grad inference
+	  only; skipped if validation split is empty). Maps to
+	  GRPOConfig.eval_steps.
+
+comment "Reward configuration"
+
+choice REWARD_MODE
+	prompt "Reward computation mode"
+	default REWARD_WEIGHTED_SUM
+	help
+	  Reward computation mode. Currently only REWARD_WEIGHTED_SUM
+	  is supported.
+
+config REWARD_WEIGHTED_SUM
+	bool "Weighted sum"
+	help
+	  r = w_correct * r_correct + w_valid * r_valid
+	    - w_depth * depth_term - w_invalid * 1[invalid]
+
+endchoice
+
+config REWARD_WEIGHT_CORRECTNESS
+	string "Weight: answer correctness"
+	default "1.0"
+	help
+	  Weight for answer correctness in the reward formula. Parsed as
+	  float.
+
+config REWARD_WEIGHT_VALIDITY
+	string "Weight: DAG validity"
+	default "0.5"
+	help
+	  Weight for DAG validity (1 if valid, 0 if invalid). Parsed as
+	  float.
+
+config REWARD_WEIGHT_DEPTH
+	string "Weight: depth penalty"
+	default "0.1"
+	help
+	  Weight for the depth penalty term. Parsed as float.
+
+config REWARD_WEIGHT_INVALID_PENALTY
+	string "Weight: invalid DAG penalty"
+	default "0.5"
+	help
+	  Flat penalty for producing an invalid DAG. Parsed as float.
+
+choice REWARD_DEPTH_NORMALIZATION
+	prompt "Depth normalization method"
+	default REWARD_DEPTH_DIVIDE_BY_MAX
+	help
+	  How depth is normalized before applying the weight.
+
+config REWARD_DEPTH_NONE
+	bool "NONE — raw depth value"
+	help
+	  depth_term = depth (no normalization).
+
+config REWARD_DEPTH_DIVIDE_BY_MAX
+	bool "DIVIDE_BY_MAX_DEPTH — divide by max depth, clamped to [0,1]"
+	help
+	  depth_term = depth / REWARD_MAX_DEPTH, clamped to [0, 1].
+
+config REWARD_DEPTH_CLAMPED_LINEAR
+	bool "CLAMPED_LINEAR — min(depth / max_depth, 1.0)"
+	help
+	  depth_term = min(depth / REWARD_MAX_DEPTH, 1.0). Identical to
+	  DIVIDE_BY_MAX_DEPTH with clamp; kept as a named choice for
+	  clarity.
+
+endchoice
+
+config REWARD_MAX_DEPTH
+	int "Maximum depth for normalization"
+	default 10
+	help
+	  Maximum depth used by DIVIDE_BY_MAX_DEPTH and CLAMPED_LINEAR
+	  normalization modes.
+
+config REWARD_INVALID_IF_PARSE_FAILS
+	bool "Treat parse failures as invalid DAG"
+	default y
+	help
+	  If the LLM output cannot be parsed as JSON at all, treat as
+	  invalid DAG in the reward computation.
+
+config REWARD_CORRECTNESS_PARTIAL_CREDIT
+	bool "Partial credit for correctness"
+	default n
+	help
+	  If enabled, use fuzzy string matching for partial correctness
+	  credit (0.0-1.0). If disabled, exact match only (binary 0/1).
+
+comment "LoRA / QLoRA configuration"
+
+config TRAIN_USE_4BIT
+	bool "QLoRA: load base model in 4-bit (NF4)"
+	default y
+	help
+	  Load base model in 4-bit NF4 quantization for QLoRA training.
+
+config TRAIN_BNB_4BIT_QUANT_TYPE
+	string "BitsAndBytes 4-bit quantization type"
+	default "nf4"
+	help
+	  "nf4" or "fp4".
+
+config TRAIN_BNB_4BIT_COMPUTE_DTYPE
+	string "BitsAndBytes compute dtype"
+	default "bfloat16"
+	help
+	  Compute dtype for 4-bit ops: "bfloat16" or "float16".
+
+config TRAIN_USE_GRADIENT_CHECKPOINTING
+	bool "Gradient checkpointing"
+	default y
+	help
+	  Enable gradient checkpointing to reduce VRAM at the cost of ~30%
+	  slower backward pass.
+
+config TRAIN_LORA_R
+	int "LoRA rank"
+	default 16
+	help
+	  Rank of the LoRA adapters.
+
+config TRAIN_LORA_ALPHA
+	int "LoRA alpha (scaling factor)"
+	default 32
+	help
+	  Alpha scaling factor for LoRA.
+
+config TRAIN_LORA_DROPOUT
+	string "LoRA dropout rate"
+	default "0.05"
+	help
+	  Dropout rate for LoRA layers. Parsed as float.
+
+config TRAIN_LORA_TARGET_MODULES
+	string "LoRA target modules"
+	default "q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj"
+	help
+	  Comma-separated list of module names to attach LoRA adapters.
+
+config TRAIN_LORA_BIAS
+	string "LoRA bias handling"
+	default "none"
+	help
+	  Bias handling: "none", "all", or "lora_only".
+
+config TRAIN_LOAD_FROM_CHECKPOINT
+	bool "Resume from checkpoint"
+	default n
+	help
+	  If enabled, resume training from an existing checkpoint.
+
+config TRAIN_CHECKPOINT_PATH
+	string "Checkpoint path to resume from"
+	default ""
+	depends on TRAIN_LOAD_FROM_CHECKPOINT
+	help
+	  Path to checkpoint directory. If empty and --resume is passed,
+	  auto-detect latest via checkpoint_index.json.
+
+comment "Checkpoint / model export"
+
+config TRAIN_OUTPUT_DIR
+	string "Training output directory"
+	default "output/train"
+	help
+	  Root directory for all training outputs (checkpoints, stats,
+	  curves). Resolved relative to PERSISTENT_ROOT.
+
+config TRAIN_SAVE_LATEST
+	bool "Update 'latest' symlink on each save"
+	default y
+	help
+	  Update the latest symlink after every periodic checkpoint save.
+
+config TRAIN_SAVE_BEST_BY
+	string "Best-model metric"
+	default "eval_reward_mean"
+	help
+	  Metric to track for best-model saving. Must match a key in eval
+	  stats. Requires a non-empty validation split.
+
+config TRAIN_SAVE_MERGED_ADAPTER
+	bool "Save merged adapter at end of training"
+	default n
+	help
+	  Merge LoRA adapter into base model and save to checkpoints/merged/.
+	  Contains inference-ready weights only (no optimizer/RNG state).
+
+config TRAIN_SAVE_ADAPTER_ONLY
+	bool "Save adapter-only checkpoints"
+	default y
+	help
+	  Save only LoRA adapter weights in periodic checkpoints, best/,
+	  and latest. When enabled, checkpoints must be merged before SGLang
+	  serving. When disabled, full model weights are saved.
+
+endmenu

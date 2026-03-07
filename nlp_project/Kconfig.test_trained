@@ -1,0 +1,66 @@
+menu "Post-Training Test Evaluation"
+
+comment "Checkpoint selection"
+
+choice TEST_TRAINED_CHECKPOINT_SOURCE
+	prompt "Checkpoint to evaluate"
+	default TEST_TRAINED_CHECKPOINT_BEST
+	help
+	  Which trained checkpoint to evaluate on the test split.
+
+config TEST_TRAINED_CHECKPOINT_BEST
+	bool "Best — best checkpoint selected by TRAIN_SAVE_BEST_BY"
+	help
+	  Evaluate <TRAIN_OUTPUT_DIR>/checkpoints/best/.
+
+config TEST_TRAINED_CHECKPOINT_LATEST
+	bool "Latest — most recently saved checkpoint"
+	help
+	  Evaluate <TRAIN_OUTPUT_DIR>/checkpoints/latest/.
+
+config TEST_TRAINED_CHECKPOINT_MERGED
+	bool "Merged — merged full-weight checkpoint"
+	help
+	  Evaluate <TRAIN_OUTPUT_DIR>/checkpoints/merged/. Requires
+	  TRAIN_SAVE_MERGED_ADAPTER=y during training.
+
+config TEST_TRAINED_CHECKPOINT_EXPLICIT_PATH
+	bool "Explicit path — user-provided checkpoint path"
+	help
+	  Evaluate the checkpoint at TEST_TRAINED_CHECKPOINT_PATH.
+
+endchoice
+
+config TEST_TRAINED_CHECKPOINT_PATH
+	string "Explicit checkpoint path"
+	default ""
+	depends on TEST_TRAINED_CHECKPOINT_EXPLICIT_PATH
+	help
+	  Path to the checkpoint directory to evaluate. Used only when
+	  checkpoint source is EXPLICIT_PATH.
+
+comment "Output paths"
+
+config TEST_TRAINED_OUTPUT_DIR
+	string "Test evaluation output directory"
+	default ""
+	help
+	  Root for test-eval outputs. If empty, derived as
+	  <TRAIN_OUTPUT_DIR>/test_<source>/ where <source> is best, latest,
+	  merged, or explicit.
+
+config TEST_TRAINED_RESULT_FILE
+	string "Test evaluation result JSONL"
+	default ""
+	help
+	  Result JSONL path. If empty, derived as
+	  <TEST_TRAINED_OUTPUT_DIR>/results.jsonl.
+
+config TEST_TRAINED_DAG_STATS_FILE
+	string "Test evaluation DAG stats"
+	default ""
+	help
+	  DAG stats JSON path. If empty, derived as
+	  <TEST_TRAINED_OUTPUT_DIR>/dag_stats.json.
+
+endmenu

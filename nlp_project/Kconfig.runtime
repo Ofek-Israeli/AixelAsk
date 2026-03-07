@@ -1,0 +1,145 @@
+menu "Runtime Configuration"
+
+config MAX_WORKERS
+	int "Thread pool max workers"
+	default 5
+	help
+	  ThreadPoolExecutor(max_workers=...) for concurrent item processing.
+
+config LLM_MAX_OUTPUT_TOKENS
+	int "LLM max output tokens"
+	default 2048
+	help
+	  max_tokens in chat completion calls. Controls completion length,
+	  not context window (context is SGLANG_CONTEXT_LENGTH).
+
+config LLM_RETRIES
+	int "LLM call retry count"
+	default 30
+	help
+	  Number of retries for LLM calls on failure.
+
+comment "LLM Sampling Parameters"
+
+config LLM_TEMPERATURE
+	string "Sampling temperature"
+	default "0.0"
+	help
+	  Controls randomness. 0.0 = greedy/deterministic. Parsed as float.
+
+config LLM_TOP_P
+	string "Nucleus sampling (top_p)"
+	default "1.0"
+	help
+	  Nucleus sampling threshold. 1.0 = no nucleus filtering. Parsed
+	  as float.
+
+config LLM_TOP_K
+	int "Top-k sampling"
+	default 0
+	help
+	  0 = disabled (field omitted from request). SGLang-specific;
+	  ignored by standard OpenAI API.
+
+config LLM_FREQUENCY_PENALTY
+	string "Frequency penalty"
+	default "0.0"
+	help
+	  Penalizes tokens by their frequency in the response so far.
+	  Range [-2.0, 2.0]. Parsed as float.
+
+config LLM_PRESENCE_PENALTY
+	string "Presence penalty"
+	default "0.0"
+	help
+	  Penalizes tokens that have appeared at all. Range [-2.0, 2.0].
+	  Parsed as float.
+
+config LLM_SEED
+	int "LLM sampling seed"
+	default -1
+	help
+	  -1 = omit the field (server chooses). >=0 = include seed=<value>
+	  in the request for reproducible sampling (best-effort).
+
+comment "Embedding Parameters"
+
+config EMBEDDING_BATCH_SIZE
+	int "Embedding encode batch size"
+	default 32
+	help
+	  Batch size for SentenceTransformer.encode().
+
+config EMBEDDING_DEVICE
+	string "Embedding model device"
+	default "cuda"
+	help
+	  "cuda" or "cpu" for the embedding model.
+
+config EMBEDDING_RETRIES
+	int "Embedding call retries"
+	default 5
+	help
+	  Retry count for embedding calls.
+
+comment "Execution Parameters"
+
+config SKIP_EXISTING
+	bool "Skip already-processed indices"
+	default y
+	help
+	  Skip indices that already exist in the result file.
+
+config CUDA_VISIBLE_DEVICES
+	string "CUDA_VISIBLE_DEVICES override"
+	default ""
+	help
+	  If non-empty, set as CUDA_VISIBLE_DEVICES env var before launching
+	  SGLang and loading the embedding model. Empty = inherit from
+	  environment. Example: "0" for single-GPU, "0,1" for 2-GPU TP.
+
+comment "Concurrency Limits"
+
+config DAG_NODE_MAX_INFLIGHT
+	int "Max in-flight DAG nodes per item"
+	default 16
+	help
+	  Maximum DAG nodes executing concurrently within a single item's
+	  DAG. Limits frontier width.
+
+config RETRIEVAL_PARALLELISM
+	int "Retrieval parallelism per frontier"
+	default 8
+	help
+	  Maximum concurrent retrieval operations within a single DAG
+	  frontier (embedding + similarity search).
+
+config RETRIEVAL_EMBED_BATCH_SIZE
+	int "Retrieval embedding batch size"
+	default 32
+	help
+	  Batch size for embed_batch() when coalescing multiple retrieval
+	  nodes in the same frontier.
+
+config REASONING_PARALLELISM
+	int "Reasoning parallelism per frontier"
+	default 8
+	help
+	  Maximum concurrent LLM (reasoning) calls within a single DAG
+	  frontier.
+
+config SGLANG_CLIENT_CONCURRENCY
+	int "SGLang client concurrency (global)"
+	default 32
+	help
+	  Global cap on outstanding HTTP requests to the SGLang server
+	  across all items/threads. Implemented as a shared semaphore.
+
+config GLOBAL_EMBEDDING_CONCURRENCY
+	int "Global embedding concurrency"
+	default 4
+	help
+	  Global cap on concurrent embed_batch calls across all items.
+	  Serializes GPU embedding access to prevent OOM.
+
+endmenu

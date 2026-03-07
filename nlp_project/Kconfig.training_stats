@@ -1,0 +1,115 @@
+menu "Training Statistics & Curves"
+
+config TRAIN_STATS_ENABLE
+	bool "Enable training statistics collection"
+	default y
+	help
+	  Master switch for training statistics collection.
+
+config TRAIN_STATS_FILE
+	string "End-of-run summary JSON path"
+	default ""
+	depends on TRAIN_STATS_ENABLE
+	help
+	  End-of-run summary JSON path. If empty, derived as
+	  <TRAIN_OUTPUT_DIR>/train_stats_summary.json.
+
+config TRAIN_STATS_PER_STEP_JSONL
+	string "Per-step metrics JSONL path"
+	default ""
+	depends on TRAIN_STATS_ENABLE
+	help
+	  Per-step metrics output. If empty, derived as
+	  <TRAIN_OUTPUT_DIR>/train_steps.jsonl.
+
+config TRAIN_STATS_PER_EVAL_JSONL
+	string "Per-evaluation metrics JSONL path"
+	default ""
+	depends on TRAIN_STATS_ENABLE
+	help
+	  Per-evaluation metrics output. If empty, derived as
+	  <TRAIN_OUTPUT_DIR>/train_evals.jsonl.
+
+config TRAIN_CURVES_DIR
+	string "TeX learning curves directory"
+	default ""
+	depends on TRAIN_STATS_ENABLE
+	help
+	  Root directory for TeX learning curve artifacts. If empty, derived
+	  as <TRAIN_OUTPUT_DIR>/curves.
+
+config TRAIN_CURVES_TEX_ENABLE
+	bool "Maintain TeX/PGFPlots source files"
+	default y
+	depends on TRAIN_STATS_ENABLE
+	help
+	  Maintain TeX/PGFPlots source files for learning curves.
+
+config TRAIN_CURVES_COMPILE_ENABLE
+	bool "Auto-compile TeX to PDF"
+	default y
+	depends on TRAIN_CURVES_TEX_ENABLE
+	help
+	  Automatically compile TeX to PDF during training.
+
+config TRAIN_CURVES_UPDATE_EVERY_STEPS
+	int "TSV/TeX update interval (steps)"
+	default 25
+	depends on TRAIN_CURVES_TEX_ENABLE
+	help
+	  Update TSV data files and regenerate TeX every N optimizer steps.
+
+config TRAIN_CURVES_COMPILE_EVERY_STEPS
+	int "PDF compile interval (steps)"
+	default 100
+	depends on TRAIN_CURVES_COMPILE_ENABLE
+	help
+	  Compile TeX to PDF every N optimizer steps.
+
+config TRAIN_CURVES_COMPILE_AT_END
+	bool "Compile all curves at end of training"
+	default y
+	depends on TRAIN_CURVES_COMPILE_ENABLE
+	help
+	  Always compile all curves at end of training regardless of step
+	  count.
+
+config TRAIN_CURVES_LATEXMK
+	bool "Use latexmk for compilation"
+	default y
+	depends on TRAIN_CURVES_COMPILE_ENABLE
+	help
+	  Use latexmk -pdf for compilation. If disabled, use the LaTeX
+	  engine directly.
+
+config TRAIN_CURVES_LATEX_ENGINE
+	string "LaTeX engine"
+	default "pdflatex"
+	depends on TRAIN_CURVES_COMPILE_ENABLE
+	help
+	  LaTeX engine used by latexmk or directly. Alternatives: lualatex,
+	  xelatex.
+
+config TRAIN_CURVES_PDFLATEX_TIMEOUT_SEC
+	int "TeX compilation timeout (seconds)"
+	default 60
+	depends on TRAIN_CURVES_COMPILE_ENABLE
+	help
+	  Timeout per TeX compilation in seconds.
+
+config TRAIN_CURVES_KEEP_LAST_N_POINTS
+	int "Rolling window size (data points)"
+	default 0
+	depends on TRAIN_CURVES_TEX_ENABLE
+	help
+	  If >0, keep only the last N data points in TSV files (rolling
+	  window). 0 = keep all.
+
+config TRAIN_STATS_FLUSH_EVERY_STEPS
+	int "Per-step JSONL flush interval"
+	default 10
+	depends on TRAIN_STATS_ENABLE
+	help
+	  Flush per-step JSONL to disk every N steps for crash resilience.
+
+endmenu

@@ -1,0 +1,67 @@
+menu "SGLang Server Configuration"
+
+config SGLANG_HOST
+	string "SGLang bind host"
+	default "0.0.0.0"
+	help
+	  --host argument for the SGLang server.
+
+config SGLANG_PORT
+	int "SGLang port"
+	default 30000
+	help
+	  --port argument for the SGLang server.
+
+config SGLANG_TP_SIZE
+	int "Tensor parallelism size"
+	default 1
+	help
+	  --tp-size for SGLang. Set to the number of GPUs for tensor
+	  parallel inference.
+
+config SGLANG_MEM_FRACTION
+	string "KV-cache memory fraction"
+	default "0.85"
+	help
+	  --mem-fraction-static for SGLang. Fraction of GPU memory allocated
+	  to the KV cache. Parsed as float.
+
+config SGLANG_DTYPE
+	string "Model dtype"
+	default "float16"
+	help
+	  --dtype for SGLang (e.g. float16, bfloat16).
+
+config SGLANG_CONTEXT_LENGTH
+	int "Context length"
+	default 8192
+	help
+	  --context-length for SGLang. Mistral-7B-v0.3 supports up to 32768
+	  natively. Default 8192 is conservative for single-GPU setups.
+
+config SGLANG_EXTRA_ARGS
+	string "Extra SGLang arguments"
+	default ""
+	help
+	  Appended verbatim to the SGLang launch command.
+
+config SGLANG_HEALTH_TIMEOUT
+	int "Health check timeout (seconds)"
+	default 300
+	help
+	  Seconds to wait for the SGLang health probe to return 200.
+
+config SGLANG_HEALTH_INTERVAL
+	int "Health check poll interval (seconds)"
+	default 5
+	help
+	  Seconds between health check polls.
+
+config SGLANG_HEALTH_ENDPOINT
+	string "Health check endpoint"
+	default "/health"
+	help
+	  Primary health-check endpoint path. Override if SGLang version
+	  lacks /health.
+
+endmenu
