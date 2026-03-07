@@ -65,9 +65,8 @@ def _install_mock_upstream():
 
 @dataclass
 class _StubConfig:
-    SPLIT_MODE: str = "seeded_ratio"
-    INFERENCE_DATASET_PATH: str = ""
-    DATASET: str = "DATASET_WIKITQ_4K"
+    SPLIT_YAML_PATH: str = ""
+    AIXELASK_ROOT: str = ""
     RESULT_FILE: str = ""
     DAG_STATS_FILE: str = ""
     DAG_STATS_ENABLE: bool = True
@@ -88,18 +87,6 @@ class _StubConfig:
     LOG_LLM_RESPONSES: bool = False
     LLM_CALLS_SIDEFILE: str = ""
     resolved_dag_prompt_path: str = ""
-
-    # Explicit-indices config fields
-    SPLIT_TRAIN_WIKITQ_4K_INDICES: List[int] = field(default_factory=list)
-    SPLIT_VALID_WIKITQ_4K_INDICES: List[int] = field(default_factory=list)
-    SPLIT_TEST_WIKITQ_4K_INDICES: List[int] = field(default_factory=list)
-    SPLIT_TRAIN_WIKITQ_PLUS_INDICES: List[int] = field(default_factory=list)
-    SPLIT_VALID_WIKITQ_PLUS_INDICES: List[int] = field(default_factory=list)
-    SPLIT_TEST_WIKITQ_PLUS_INDICES: List[int] = field(default_factory=list)
-    SPLIT_TRAIN_SCALABILITY_INDICES: List[int] = field(default_factory=list)
-    SPLIT_VALID_SCALABILITY_INDICES: List[int] = field(default_factory=list)
-    SPLIT_TEST_SCALABILITY_INDICES: List[int] = field(default_factory=list)
-    AIXELASK_ROOT: str = ""
 
 
 def _write_dataset(path: str, n: int = 5) -> None:
@@ -291,6 +278,133 @@ class TestDagStatsFileProduced:
 
         assert result.dag_stats_file is not None
         assert os.path.isfile(result.dag_stats_file)
+
+
+# ---------------------------------------------------------------------------
+# Per-item telemetry fields in result records
+# ---------------------------------------------------------------------------
+
+class TestPerItemTelemetry:
+
+    @patch("src.pipeline._resolve_test_split")
+    def test_telemetry_fields_in_result_record(self, mock_resolve, tmp_path):
+        """Result records include item_latency_sec, total_prompt_tokens,
+        total_completion_tokens, num_llm_calls, exec_max_frontier_width."""
+        result_file = str(tmp_path / "results.jsonl")
+
+        examples = [
+            {"statement": "q1", "answer": "42", "table": [["h"], ["v"]],
+             "_source_dataset": "wikitq_4k", "_source_file": "test.jsonl",
+             "_source_index": 0},
+        ]
+        mock_resolve.return_value = examples
+
+        cfg = _StubConfig(
+            RESULT_FILE=result_file,
+            DAG_STATS_ENABLE=False,
+        )
+
+        for attr in ("ROW_PROMPT", "COL_PROMPT", "FINAL_REASONING_PROMPT",
+                      "NOPLAN_REASONING_PROMPT", "resolved_dag_prompt_path"):
+            p = str(tmp_path / f"{attr}.txt")
+            _write_prompt(p)
+            setattr(cfg, attr, p)
+
+        cfg.EMBEDDING_CACHE = str(tmp_path / "emb_cache")
+        os.makedirs(cfg.EMBEDDING_CACHE, exist_ok=True)
+
+        from src.item_context import DagMetadataStore, ExecTelemetryStore
+
+        mock_mods, mock_frm = _install_mock_upstream()
+
+        with patch.dict("sys.modules", mock_mods):
+            from src.pipeline import run
+
+            result = run(
+                cfg,
+                dag_metadata_store=DagMetadataStore(),
+                exec_telemetry_store=ExecTelemetryStore(),
+            )
+
+        with open(result_file) as f:
+            lines = [l.strip() for l in f if l.strip()]
+        record = json.loads(lines[0])
+
+        assert "item_latency_sec" in record
+        assert isinstance(record["item_latency_sec"], (int, float))
+        assert record["item_latency_sec"] >= 0
+
+        assert "total_prompt_tokens" in record
+        assert "total_completion_tokens" in record
+        assert "total_tokens" in record
+        assert "num_llm_calls" in record
+        assert record["total_tokens"] == record["total_prompt_tokens"] + record["total_completion_tokens"]
+
+        assert "exec_max_frontier_width" in record
+        assert "exec_avg_frontier_width" in record
+
+
+# ---------------------------------------------------------------------------
+# Telemetry summary file produced
+# ---------------------------------------------------------------------------
+
+class TestTelemetrySummary:
+
+    @patch("src.pipeline._resolve_test_split")
+    def test_telemetry_summary_written(self, mock_resolve, tmp_path):
+        """Pipeline writes a telemetry_summary.json next to the result file."""
+        result_file = str(tmp_path / "results.jsonl")
+
+        examples = [
+            {"statement": f"q{i}", "answer": str(i), "table": [["h"], [f"v{i}"]],
+             "_source_dataset": "test", "_source_file": "f", "_source_index": i}
+            for i in range(3)
+        ]
+        mock_resolve.return_value = examples
+
+        cfg = _StubConfig(
+            RESULT_FILE=result_file,
+            DAG_STATS_ENABLE=False,
+        )
+
+        for attr in ("ROW_PROMPT", "COL_PROMPT", "FINAL_REASONING_PROMPT",
+                      "NOPLAN_REASONING_PROMPT", "resolved_dag_prompt_path"):
+            p = str(tmp_path / f"{attr}.txt")
+            _write_prompt(p)
+            setattr(cfg, attr, p)
+
+        cfg.EMBEDDING_CACHE = str(tmp_path / "emb_cache")
+        os.makedirs(cfg.EMBEDDING_CACHE, exist_ok=True)
+
+        from src.item_context import DagMetadataStore, ExecTelemetryStore
+
+        mock_mods, mock_frm = _install_mock_upstream()
+
+        with patch.dict("sys.modules", mock_mods):
+            from src.pipeline import run
+
+            result = run(
+                cfg,
+                dag_metadata_store=DagMetadataStore(),
+                exec_telemetry_store=ExecTelemetryStore(),
+            )
+
+        assert result.telemetry_summary_file is not None
+        assert os.path.isfile(result.telemetry_summary_file)
+
+        with open(result.telemetry_summary_file) as f:
+            summary = json.load(f)
+
+        assert summary["total_items"] == 3
+        assert "total_llm_calls" in summary
+        assert "total_prompt_tokens" in summary
+        assert "total_completion_tokens" in summary
+        assert "total_tokens" in summary
+        assert "mean_item_latency_sec" in summary
+        assert "p50_item_latency_sec" in summary
+        assert "p90_item_latency_sec" in summary
+        assert "max_item_latency_sec" in summary
+        assert summary["mean_item_latency_sec"] >= 0
 
 
 # ---------------------------------------------------------------------------

@@ -25,8 +25,6 @@ def _write_config(tmp_path, lines: str) -> str:
 def _minimal_config_text() -> str:
     return textwrap.dedent("""\
         CONFIG_PERSISTENT_ROOT="{project}"
-        CONFIG_INFERENCE_DATASET_PATH="dataset/WikiTQ-4k/test.jsonl"
-        CONFIG_TRAIN_DATASET_PATH="dataset/WikiTQ-4k/train.jsonl"
         CONFIG_FEWSHOT_VARIANT="FEWSHOT_STANDARD_ALL3"
     """.format(project=PROJECT_DIR))
 
@@ -40,7 +38,6 @@ class TestSeedInheritance:
     def test_global_seed_only(self, tmp_path):
         """All stage seeds at -1 → inherit GLOBAL_SEED=42."""
         from src.config import load_config
-        from src.training.train_config import TrainConfig
 
         text = _minimal_config_text() + textwrap.dedent("""\
             CONFIG_GLOBAL_SEED=42
@@ -79,30 +76,6 @@ class TestSeedInheritance:
 
 
 # ---------------------------------------------------------------------------
-# Overfit PoC config
-# ---------------------------------------------------------------------------
-
-class TestOverfitPoC:
-
-    def test_overfit_poc_resolves_correctly(self, tmp_path):
-        from src.config import load_config
-
-        text = _minimal_config_text() + textwrap.dedent("""\
-            CONFIG_TRAINING_MODE="TRAINING_MODE_OVERFIT_POC"
-            CONFIG_SPLIT_MODE="SPLIT_MODE_OVERFIT_POC"
-            CONFIG_OVERFIT_POC_NUM_EXAMPLES=16
-        """)
-        path = _write_config(tmp_path, text)
-
-        with mock.patch("src.config._validate"):
-            cfg = load_config(path)
-
-        assert cfg.TRAINING_MODE == "TRAINING_MODE_OVERFIT_POC"
-        assert cfg.OVERFIT_POC_NUM_EXAMPLES == 16
-        assert cfg.SPLIT_MODE == "overfit_poc"
-
-
-# ---------------------------------------------------------------------------
 # Training mode selection
 # ---------------------------------------------------------------------------
 
@@ -116,10 +89,8 @@ class TestTrainingMode:
     def test_mode_selection(self, tmp_path, mode_val, expected_mode):
         from src.config import load_config
 
-        split = "SPLIT_MODE_OVERFIT_POC" if mode_val == "TRAINING_MODE_OVERFIT_POC" else "SPLIT_MODE_SEEDED_RATIO"
         text = _minimal_config_text() + textwrap.dedent(f"""\
             CONFIG_TRAINING_MODE="{mode_val}"
-            CONFIG_SPLIT_MODE="{split}"
         """)
         path = _write_config(tmp_path, text)
 
@@ -218,58 +189,22 @@ class TestDefconfigs:
 
 class TestTrainConfigFromConfig:
 
-    def test_split_mode_in_train_config(self, tmp_path):
+    def test_proxy_attribute_access(self, tmp_path):
+        """TrainConfig proxies attribute access to base Config."""
         from src.config import load_config
         from src.training.train_config import TrainConfig
 
-        text = _minimal_config_text() + textwrap.dedent("""\
-            CONFIG_SPLIT_MODE="SPLIT_MODE_EXPLICIT_INDICES"
-        """)
-        path = _write_config(tmp_path, text)
+        path = _write_config(tmp_path, _minimal_config_text())
 
         with mock.patch("src.config._validate"):
             cfg = load_config(path)
 
         tc = TrainConfig.from_config(cfg)
-        assert tc.split_mode == "explicit_indices"
-
-    def test_split_indices_in_train_config(self, tmp_path):
-        from src.config import load_config
-        from src.training.train_config import TrainConfig
-
-        text = _minimal_config_text() + textwrap.dedent("""\
-            CONFIG_SPLIT_TRAIN_WIKITQ_4K_INDICES="0,1,2"
-        """)
-        path = _write_config(tmp_path, text)
-
-        with mock.patch("src.config._validate"):
-            cfg = load_config(path)
-
-        tc = TrainConfig.from_config(cfg)
-        assert tc.split_train_indices["wikitq_4k"] == [0, 1, 2]
-
-    def test_split_mode_forced_for_overfit(self, tmp_path):
-        from src.config import load_config
-        from src.training.train_config import TrainConfig
-
-        text = _minimal_config_text() + textwrap.dedent("""\
-            CONFIG_TRAINING_MODE="TRAINING_MODE_OVERFIT_POC"
-            CONFIG_SPLIT_MODE="SPLIT_MODE_EXPLICIT_INDICES"
-        """)
-        path = _write_config(tmp_path, text)
-
-        # _validate forces overfit_poc; mock only fewshot check to avoid
-        # FileNotFoundError on missing fewshot files, not the full _validate
-        with mock.patch("os.path.isfile", return_value=True):
-            cfg = load_config(path)
-
-        assert cfg.SPLIT_MODE == "overfit_poc"
-        tc = TrainConfig.from_config(cfg)
-        assert tc.split_mode == "overfit_poc"
+        assert tc.SGLANG_PORT == cfg.SGLANG_PORT
+        assert tc.GRPO_TEMPERATURE == cfg.GRPO_TEMPERATURE
 
     def test_test_trained_checkpoint_source(self, tmp_path):
         from src.config import load_config
-        from src.training.train_config import TrainConfig
 
         text = _minimal_config_text() + textwrap.dedent("""\
             CONFIG_TEST_TRAINED_CHECKPOINT_SOURCE="TEST_TRAINED_CHECKPOINT_LATEST"
@@ -296,17 +231,3 @@ class TestTrainConfigFromConfig:
 
         assert cfg.TEST_TRAINED_OUTPUT_DIR.endswith("test_best") or \
                cfg.TEST_TRAINED_OUTPUT_DIR.endswith("test_best/")
-
-    def test_proxy_attribute_access(self, tmp_path):
-        """TrainConfig proxies attribute access to base Config."""
-        from src.config import load_config
-        from src.training.train_config import TrainConfig
-
-        path = _write_config(tmp_path, _minimal_config_text())
-
-        with mock.patch("src.config._validate"):
-            cfg = load_config(path)
-
-        tc = TrainConfig.from_config(cfg)
-        assert tc.SGLANG_PORT == cfg.SGLANG_PORT
-        assert tc.GRPO_TEMPERATURE == cfg.GRPO_TEMPERATURE

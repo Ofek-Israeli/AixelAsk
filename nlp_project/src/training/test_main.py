@@ -164,15 +164,7 @@ def main() -> None:
     from src.item_context import DagMetadataStore, ExecTelemetryStore
     from src.dag_stats import DagStats
 
-    call_capture_requested = (
-        config.LOG_LLM_CALLS_PER_ITEM
-        or config.LOG_LLM_PROMPTS
-        or config.LOG_LLM_RESPONSES
-        or bool(config.LLM_CALLS_SIDEFILE)
-    )
-    call_recorder: Optional[CallRecorder] = (
-        CallRecorder(config) if call_capture_requested else None
-    )
+    call_recorder: Optional[CallRecorder] = CallRecorder(config)
 
     dag_metadata_store = DagMetadataStore()
     exec_telemetry_store = ExecTelemetryStore()

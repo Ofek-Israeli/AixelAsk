@@ -32,70 +32,19 @@ config TRAINING_MODE_OVERFIT_POC
 
 endchoice
 
-comment "Dataset / split / overfit selection (SPLIT_MODE_SEEDED_RATIO only)"
-
-config TRAIN_DATASET_PATH
-	string "Training data path"
-	default "dataset/WikiTQ-4k/train.jsonl"
-	help
-	  Path to training data (JSONL). Used only in SPLIT_MODE_SEEDED_RATIO.
-
-config TRAIN_DEV_DATASET_PATH
-	string "Explicit dev set path"
-	default ""
-	help
-	  If empty, split from training data using TRAIN_SPLIT_RATIO. Used
-	  only in SPLIT_MODE_SEEDED_RATIO.
-
-config TRAIN_USE_SEEDED_SPLIT
-	bool "Use seeded train/dev split"
-	default y
-	help
-	  When enabled and dev path is empty, create a stable seeded
-	  train/dev split. Used only in SPLIT_MODE_SEEDED_RATIO.
-
-config TRAIN_SPLIT_RATIO
-	string "Train split ratio"
-	default "0.9"
-	help
-	  Fraction of data used for training (remainder goes to dev). Parsed
-	  as float. Used only in SPLIT_MODE_SEEDED_RATIO.
-
-config TRAIN_SPLIT_SEED
-	int "Train/dev split seed"
-	default -1
-	help
-	  Seed for train/dev split RNG. -1 = inherit from GLOBAL_SEED. Used
-	  only in SPLIT_MODE_SEEDED_RATIO.
-
-config TRAIN_MAX_TRAIN_EXAMPLES
-	int "Max training examples"
-	default 0
-	help
-	  Cap on training examples. 0 = use all. Applies in all split modes
-	  after split construction.
-
-config TRAIN_MAX_DEV_EXAMPLES
-	int "Max dev examples"
-	default 0
-	help
-	  Cap on dev/validation examples. 0 = use all. Applies in all split
-	  modes after split construction.
-
-comment "Overfit PoC selection (SPLIT_MODE_OVERFIT_POC only)"
+comment "Overfit PoC selection"
 
 config OVERFIT_POC_NUM_EXAMPLES
 	int "Overfit PoC example count"
 	default 16
 	help
-	  Number of examples for the overfit PoC subset. Used only in
-	  SPLIT_MODE_OVERFIT_POC.
+	  Number of examples for the overfit PoC subset.
 
 choice OVERFIT_POC_SELECTION_MODE
 	prompt "Overfit PoC selection mode"
 	default OVERFIT_POC_FIRST_N
 	help
-	  How to select the tiny subset. Used only in SPLIT_MODE_OVERFIT_POC.
+	  How to select the tiny subset for overfit PoC training.
 
 config OVERFIT_POC_FIRST_N
 	bool "First N — take the first N examples"

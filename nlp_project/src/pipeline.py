@@ -11,8 +11,10 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import math
 import os
 import threading
+import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextvars import copy_context
@@ -45,6 +47,7 @@ class PipelineResult:
     accuracy: float
     result_file: str
     dag_stats_file: Optional[str]
+    telemetry_summary_file: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +158,12 @@ def run(
     error_count = 0
     _counter_lock = threading.Lock()
 
+    # Run-level telemetry accumulators (guarded by _counter_lock)
+    _run_prompt_tokens = 0
+    _run_completion_tokens = 0
+    _run_llm_calls = 0
+    _item_latencies: List[float] = []
+
     # ==================================================================
     # Step 2 — Reasoning (ThreadPoolExecutor, cross-item parallelism)
     # ==================================================================
@@ -164,9 +173,11 @@ def run(
     def process_item(item_index: int, example: dict) -> None:
         """Process a single test item inside a copied context."""
         nonlocal correct_count, error_count
+        nonlocal _run_prompt_tokens, _run_completion_tokens, _run_llm_calls
 
         token_idx = ctx_item_index.set(item_index)
         token_q = ctx_item_question.set(example.get("statement", example.get("question", "")))
+        item_t0 = time.perf_counter()
         try:
             result_record: Optional[dict] = None
             try:
@@ -223,6 +234,14 @@ def run(
                     result_record["invalid_dag_attempts"] = 0
                     result_record["validity_error_types_seen"] = []
 
+                # Executor telemetry (frontier width) in per-item result
+                if telem is not None:
+                    result_record["exec_max_frontier_width"] = telem.exec_max_frontier_width
+                    result_record["exec_avg_frontier_width"] = telem.exec_avg_frontier_width
+                else:
+                    result_record["exec_max_frontier_width"] = None
+                    result_record["exec_avg_frontier_width"] = None
+
                 # Correctness
                 is_correct = result_record.get("is_correct", False)
                 is_correct_numeric = 1 if is_correct else 0
@@ -232,9 +251,27 @@ def run(
                 result_record["dag_prompt_variant"] = config.DAG_PROMPT_VARIANT
                 result_record["fewshot_variant"] = config.FEWSHOT_VARIANT
 
-                # LLM calls
+                # LLM calls + per-item token aggregation
+                item_prompt_tokens = 0
+                item_completion_tokens = 0
+                item_num_calls = 0
                 if call_recorder is not None:
-                    result_record["llm_calls"] = call_recorder.get_calls_for_item(item_index)
+                    calls = call_recorder.get_calls_for_item(item_index)
+                    result_record["llm_calls"] = calls
+                    for c in calls:
+                        usage = c.get("usage") or {}
+                        item_prompt_tokens += usage.get("prompt_tokens", 0)
+                        item_completion_tokens += usage.get("completion_tokens", 0)
+                    item_num_calls = len(calls)
+
+                result_record["total_prompt_tokens"] = item_prompt_tokens
+                result_record["total_completion_tokens"] = item_completion_tokens
+                result_record["total_tokens"] = item_prompt_tokens + item_completion_tokens
+                result_record["num_llm_calls"] = item_num_calls
+
+                # Per-item latency
+                item_latency = time.perf_counter() - item_t0
+                result_record["item_latency_sec"] = round(item_latency, 4)
 
                 # Checkpoint provenance
                 if checkpoint_provenance is not None:
@@ -249,12 +286,16 @@ def run(
                 # Write to result file
                 _append_result(result_file_path, result_record)
 
-                # Update counters
+                # Update counters + run-level accumulators
                 with _counter_lock:
                     if is_correct:
                         correct_count += 1  # noqa: F841 — nonlocal
                     if result_record.get("error") or result_record.get("type") == "Error generation":
                         error_count += 1  # noqa: F841
+                    _run_prompt_tokens += item_prompt_tokens
+                    _run_completion_tokens += item_completion_tokens
+                    _run_llm_calls += item_num_calls
+                    _item_latencies.append(item_latency)
 
                 # Record DAG stats
                 if dag_stats is not None:
@@ -310,10 +351,20 @@ def run(
         dag_stats.print_summary()
         dag_stats_file = dag_stats_path
 
+    # ==================================================================
+    # Step 4 — Telemetry summary
+    # ==================================================================
+    telemetry_summary_file = _write_telemetry_summary(
+        result_file_path, total_items,
+        _item_latencies, _run_prompt_tokens, _run_completion_tokens, _run_llm_calls,
+    )
+
     accuracy = correct_count / total_items if total_items > 0 else 0.0
     logger.info(
-        "Pipeline complete: %d/%d correct (%.4f accuracy), %d errors",
+        "Pipeline complete: %d/%d correct (%.4f accuracy), %d errors, "
+        "%d total LLM calls, %d total tokens",
         correct_count, total_items, accuracy, error_count,
+        _run_llm_calls, _run_prompt_tokens + _run_completion_tokens,
     )
 
     return PipelineResult(
@@ -323,7 +374,62 @@ def run(
         accuracy=accuracy,
         result_file=os.path.abspath(result_file_path),
         dag_stats_file=os.path.abspath(dag_stats_file) if dag_stats_file else None,
+        telemetry_summary_file=telemetry_summary_file,
     )
+
+
+# ---------------------------------------------------------------------------
+# Telemetry summary
+# ---------------------------------------------------------------------------
+
+def _percentile(sorted_vals: List[float], p: float) -> float:
+    """Compute the *p*-th percentile (0–100) from a pre-sorted list."""
+    if not sorted_vals:
+        return 0.0
+    k = (len(sorted_vals) - 1) * (p / 100.0)
+    f = math.floor(k)
+    c = math.ceil(k)
+    if f == c:
+        return sorted_vals[int(k)]
+    return sorted_vals[f] * (c - k) + sorted_vals[c] * (k - f)
+
+
+def _write_telemetry_summary(
+    result_file_path: str,
+    total_items: int,
+    item_latencies: List[float],
+    run_prompt_tokens: int,
+    run_completion_tokens: int,
+    run_llm_calls: int,
+) -> Optional[str]:
+    """Compute and write a ``telemetry_summary.json`` next to the result file."""
+    result_dir = os.path.dirname(result_file_path) or "."
+    summary_path = os.path.join(result_dir, "telemetry_summary.json")
+
+    sorted_lat = sorted(item_latencies)
+    n = len(sorted_lat)
+
+    summary = {
+        "total_items": total_items,
+        "total_llm_calls": run_llm_calls,
+        "total_prompt_tokens": run_prompt_tokens,
+        "total_completion_tokens": run_completion_tokens,
+        "total_tokens": run_prompt_tokens + run_completion_tokens,
+        "mean_prompt_tokens_per_item": round(run_prompt_tokens / n, 2) if n else 0,
+        "mean_completion_tokens_per_item": round(run_completion_tokens / n, 2) if n else 0,
+        "mean_item_latency_sec": round(sum(sorted_lat) / n, 4) if n else 0,
+        "p50_item_latency_sec": round(_percentile(sorted_lat, 50), 4),
+        "p90_item_latency_sec": round(_percentile(sorted_lat, 90), 4),
+        "p95_item_latency_sec": round(_percentile(sorted_lat, 95), 4),
+        "max_item_latency_sec": round(sorted_lat[-1], 4) if n else 0,
+        "min_item_latency_sec": round(sorted_lat[0], 4) if n else 0,
+    }
+
+    os.makedirs(result_dir, exist_ok=True)
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+    logger.info("Telemetry summary written to %s", summary_path)
+    return os.path.abspath(summary_path)
 
 
 # ---------------------------------------------------------------------------
@@ -331,87 +437,15 @@ def run(
 # ---------------------------------------------------------------------------
 
 def _resolve_test_split(config: Config) -> List[dict]:
-    """Load and materialize the test split into a list of enriched dicts.
+    """Load the test split from ``train_valid_test.yaml``.
 
     Each returned dict has the same schema as the original JSONL line plus
     ``_source_dataset``, ``_source_file``, and ``_source_index`` keys.
     """
+    from src.yaml_splits import load_yaml_splits
 
-    if config.SPLIT_MODE == "overfit_poc":
-        raise ValueError(
-            "SPLIT_MODE_OVERFIT_POC is not supported by the inference pipeline. "
-            "Overfit-PoC evaluation happens exclusively during training."
-        )
-
-    if config.SPLIT_MODE == "explicit_indices":
-        return _load_explicit_test_split(config)
-
-    # seeded_ratio — load from CONFIG_INFERENCE_DATASET_PATH
-    return _load_seeded_ratio_test_split(config)
-
-
-def _load_explicit_test_split(config: Config) -> List[dict]:
-    """Load test examples via explicit index lists from the dataset registry."""
-    from src.training.dataset_registry import load_examples, SplitEntry
-
-    entries: List[SplitEntry] = []
-
-    _INDEX_GROUPS = [
-        ("wikitq_4k", "test", config.SPLIT_TEST_WIKITQ_4K_INDICES),
-        ("wikitq_plus", "test", config.SPLIT_TEST_WIKITQ_PLUS_INDICES),
-        ("scalability", "all", config.SPLIT_TEST_SCALABILITY_INDICES),
-    ]
-
-    for dataset_key, split_name, indices in _INDEX_GROUPS:
-        if indices:
-            loaded = load_examples(dataset_key, split_name, indices, config.AIXELASK_ROOT)
-            entries.extend(loaded)
-
-    return [
-        {
-            **entry.example,
-            "_source_dataset": entry.source_dataset,
-            "_source_file": entry.source_file,
-            "_source_index": entry.source_index,
-        }
-        for entry in entries
-    ]
-
-
-def _load_seeded_ratio_test_split(config: Config) -> List[dict]:
-    """Load all examples from ``CONFIG_INFERENCE_DATASET_PATH``."""
-    dataset_path = config.INFERENCE_DATASET_PATH
-    if not os.path.isfile(dataset_path):
-        raise FileNotFoundError(
-            f"Inference dataset not found: {dataset_path}"
-        )
-
-    dataset_key = _derive_dataset_key(config)
-    source_file = os.path.basename(dataset_path)
-
-    examples: List[dict] = []
-    with open(dataset_path, "r", encoding="utf-8") as f:
-        for line_idx, line in enumerate(f):
-            line = line.strip()
-            if not line:
-                continue
-            ex = json.loads(line)
-            ex["_source_dataset"] = dataset_key
-            ex["_source_file"] = source_file
-            ex["_source_index"] = line_idx
-            examples.append(ex)
-
-    return examples
-
-
-def _derive_dataset_key(config: Config) -> str:
-    """Map ``CONFIG_DATASET`` to a short key for provenance metadata."""
-    mapping = {
-        "DATASET_WIKITQ_4K": "wikitq_4k",
-        "DATASET_WIKITQ_PLUS": "wikitq_plus",
-        "DATASET_SCALABILITY": "scalability",
-    }
-    return mapping.get(config.DATASET, "custom")
+    splits = load_yaml_splits(config.SPLIT_YAML_PATH, config.AIXELASK_ROOT)
+    return splits["test"]
 
 
 # ---------------------------------------------------------------------------

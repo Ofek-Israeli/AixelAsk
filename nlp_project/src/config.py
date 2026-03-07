@@ -7,8 +7,8 @@ CLI override semantics (``--override KEY=VALUE``):
 1. Parse ``.config`` into raw key-value pairs.
 2. Apply all overrides (add or overwrite).
 3. Derive training output sub-paths from ``CONFIG_TRAIN_OUTPUT_DIR``.
-4. Resolve persistent / prompt / dataset paths to absolute.
-5. Validate (TabFact rejection, split-mode compat, overlap, fewshot existence).
+4. Resolve persistent / prompt paths to absolute.
+5. Validate (fewshot existence).
 6. Set ``HF_HOME`` / ``TRANSFORMERS_CACHE`` / ``TMPDIR`` environment variables.
 """
 
@@ -90,22 +90,8 @@ class Config:
     SGLANG_HEALTH_INTERVAL: int = 5
     SGLANG_HEALTH_ENDPOINT: str = "/health"
 
-    # -- Kconfig.dataset ---------------------------------------------------
-    DATASET: str = "DATASET_WIKITQ_4K"
-    INFERENCE_DATASET_PATH: str = "dataset/WikiTQ-4k/test.jsonl"
-
-    # -- Kconfig.split -----------------------------------------------------
-    SPLIT_MODE: str = "seeded_ratio"
-
-    SPLIT_TRAIN_WIKITQ_4K_INDICES: list = field(default_factory=list)
-    SPLIT_TRAIN_WIKITQ_PLUS_INDICES: list = field(default_factory=list)
-    SPLIT_TRAIN_SCALABILITY_INDICES: list = field(default_factory=list)
-    SPLIT_VALID_WIKITQ_4K_INDICES: list = field(default_factory=list)
-    SPLIT_VALID_WIKITQ_PLUS_INDICES: list = field(default_factory=list)
-    SPLIT_VALID_SCALABILITY_INDICES: list = field(default_factory=list)
-    SPLIT_TEST_WIKITQ_4K_INDICES: list = field(default_factory=list)
-    SPLIT_TEST_WIKITQ_PLUS_INDICES: list = field(default_factory=list)
-    SPLIT_TEST_SCALABILITY_INDICES: list = field(default_factory=list)
+    # -- Split (always from train_valid_test.yaml) -------------------------
+    SPLIT_YAML_PATH: str = "train_valid_test.yaml"
 
     # -- Kconfig.retrieval -------------------------------------------------
     USE_DAG: bool = True
@@ -167,13 +153,6 @@ class Config:
     ENABLE_TRAINING: bool = False
     TRAINING_MODE: str = "TRAINING_MODE_DISABLED"
 
-    TRAIN_DATASET_PATH: str = "dataset/WikiTQ-4k/train.jsonl"
-    TRAIN_DEV_DATASET_PATH: str = ""
-    TRAIN_USE_SEEDED_SPLIT: bool = True
-    TRAIN_SPLIT_RATIO: float = 0.9
-    TRAIN_SPLIT_SEED: int = -1
-    TRAIN_MAX_TRAIN_EXAMPLES: int = 0
-    TRAIN_MAX_DEV_EXAMPLES: int = 0
     OVERFIT_POC_NUM_EXAMPLES: int = 16
     OVERFIT_POC_SELECTION_MODE: str = "FIRST_N"
     OVERFIT_POC_INDICES_FILE: str = ""
@@ -263,19 +242,12 @@ class Config:
 # .config file parser
 # ---------------------------------------------------------------------------
 
-_SPLIT_MODE_MAP = {
-    "SPLIT_MODE_SEEDED_RATIO": "seeded_ratio",
-    "SPLIT_MODE_EXPLICIT_INDICES": "explicit_indices",
-    "SPLIT_MODE_OVERFIT_POC": "overfit_poc",
-}
-
 # Fields parsed as float from Kconfig string type
 _FLOAT_FIELDS = {
     "CONFIG_LLM_TEMPERATURE",
     "CONFIG_LLM_TOP_P",
     "CONFIG_LLM_FREQUENCY_PENALTY",
     "CONFIG_LLM_PRESENCE_PENALTY",
-    "CONFIG_TRAIN_SPLIT_RATIO",
     "CONFIG_GRPO_TEMPERATURE",
     "CONFIG_GRPO_TOP_P",
     "CONFIG_GRPO_CLIP_EPS",
@@ -310,8 +282,6 @@ _INT_FIELDS = {
     "CONFIG_REWARD_MAX_DEPTH",
     "CONFIG_TRAIN_LORA_R", "CONFIG_TRAIN_LORA_ALPHA",
     "CONFIG_OVERFIT_POC_NUM_EXAMPLES",
-    "CONFIG_TRAIN_SPLIT_SEED",
-    "CONFIG_TRAIN_MAX_TRAIN_EXAMPLES", "CONFIG_TRAIN_MAX_DEV_EXAMPLES",
     "CONFIG_TRAIN_CURVES_UPDATE_EVERY_STEPS",
     "CONFIG_TRAIN_CURVES_COMPILE_EVERY_STEPS",
     "CONFIG_TRAIN_CURVES_PDFLATEX_TIMEOUT_SEC",
@@ -329,7 +299,6 @@ _BOOL_FIELDS = {
     "CONFIG_DAG_STATS_WRITE_PER_ITEM", "CONFIG_LOG_EXECUTOR_STATS",
     "CONFIG_DAG_STATS_VALIDITY_ERRORS",
     "CONFIG_ENABLE_TRAINING", "CONFIG_GRPO_ENABLE",
-    "CONFIG_TRAIN_USE_SEEDED_SPLIT",
     "CONFIG_SAVE_RESOLVED_SEEDS",
     "CONFIG_REWARD_INVALID_IF_PARSE_FAILS",
     "CONFIG_REWARD_CORRECTNESS_PARTIAL_CREDIT",
@@ -374,43 +343,6 @@ def _parse_raw(config_path: str) -> dict[str, str]:
     return raw
 
 
-def _parse_index_list(raw_value: str, symbol_name: str) -> list[int]:
-    """Parse a comma-separated index string into a sorted, deduplicated int list."""
-    if not raw_value.strip():
-        return []
-    tokens = raw_value.split(",")
-    seen: set[int] = set()
-    result: list[int] = []
-    for token in tokens:
-        token = token.strip()
-        if not token:
-            continue
-        try:
-            idx = int(token)
-        except ValueError:
-            raise ValueError(
-                f"Non-integer token '{token}' in {symbol_name}"
-            )
-        if idx not in seen:
-            seen.add(idx)
-            result.append(idx)
-    result.sort()
-    return result
-
-
-# Index-list Kconfig symbols and their Config field names
-_INDEX_SYMBOLS = [
-    ("CONFIG_SPLIT_TRAIN_WIKITQ_4K_INDICES", "SPLIT_TRAIN_WIKITQ_4K_INDICES"),
-    ("CONFIG_SPLIT_TRAIN_WIKITQ_PLUS_INDICES", "SPLIT_TRAIN_WIKITQ_PLUS_INDICES"),
-    ("CONFIG_SPLIT_TRAIN_SCALABILITY_INDICES", "SPLIT_TRAIN_SCALABILITY_INDICES"),
-    ("CONFIG_SPLIT_VALID_WIKITQ_4K_INDICES", "SPLIT_VALID_WIKITQ_4K_INDICES"),
-    ("CONFIG_SPLIT_VALID_WIKITQ_PLUS_INDICES", "SPLIT_VALID_WIKITQ_PLUS_INDICES"),
-    ("CONFIG_SPLIT_VALID_SCALABILITY_INDICES", "SPLIT_VALID_SCALABILITY_INDICES"),
-    ("CONFIG_SPLIT_TEST_WIKITQ_4K_INDICES", "SPLIT_TEST_WIKITQ_4K_INDICES"),
-    ("CONFIG_SPLIT_TEST_WIKITQ_PLUS_INDICES", "SPLIT_TEST_WIKITQ_PLUS_INDICES"),
-    ("CONFIG_SPLIT_TEST_SCALABILITY_INDICES", "SPLIT_TEST_SCALABILITY_INDICES"),
-]
-
 # Persistent output/cache paths resolved against CONFIG_PERSISTENT_ROOT
 _PERSISTENT_PATH_FIELDS = [
     "MODEL_CACHE_DIR",
@@ -441,12 +373,6 @@ _PROMPT_PATH_FIELDS = [
     "PLAN_PROMPT",
 ]
 
-# Dataset paths resolved against AIXELASK_ROOT
-_DATASET_PATH_FIELDS = [
-    "INFERENCE_DATASET_PATH",
-    "TRAIN_DATASET_PATH",
-    "TRAIN_DEV_DATASET_PATH",
-]
 
 
 # ---------------------------------------------------------------------------
@@ -504,10 +430,6 @@ def load_config(
         else:
             setattr(cfg, field_name, raw_value)
 
-    # Parse split mode
-    raw_split = raw.get("CONFIG_SPLIT_MODE", "SPLIT_MODE_SEEDED_RATIO")
-    cfg.SPLIT_MODE = _SPLIT_MODE_MAP.get(raw_split, raw_split)
-
     # LOG_LLM_RESPONSES forced on when LOG_LLM_PROMPTS is on
     if cfg.LOG_LLM_PROMPTS:
         cfg.LOG_LLM_RESPONSES = True
@@ -519,14 +441,6 @@ def load_config(
     ):
         if getattr(cfg, seed_field) == -1:
             setattr(cfg, seed_field, cfg.GLOBAL_SEED)
-    if cfg.TRAIN_SPLIT_SEED == -1:
-        cfg.TRAIN_SPLIT_SEED = cfg.GLOBAL_SEED
-
-    # Parse index lists (always, for syntax checking even in seeded_ratio mode)
-    for kconfig_key, field_name in _INDEX_SYMBOLS:
-        raw_value = raw.get(kconfig_key, "")
-        setattr(cfg, field_name, _parse_index_list(raw_value, kconfig_key))
-
     # 3. Derive training output sub-paths from TRAIN_OUTPUT_DIR
     if not cfg.TRAIN_STATS_FILE:
         cfg.TRAIN_STATS_FILE = os.path.join(cfg.TRAIN_OUTPUT_DIR, "train_stats_summary.json")
@@ -567,11 +481,9 @@ def load_config(
         if val and not os.path.isabs(val):
             setattr(cfg, field_name, os.path.join(cfg.PROJECT_DIR, val))
 
-    # Dataset paths against AIXELASK_ROOT
-    for field_name in _DATASET_PATH_FIELDS:
-        val = getattr(cfg, field_name, "")
-        if val and not os.path.isabs(val):
-            setattr(cfg, field_name, os.path.join(cfg.AIXELASK_ROOT, val))
+    # Resolve SPLIT_YAML_PATH against PROJECT_DIR
+    if cfg.SPLIT_YAML_PATH and not os.path.isabs(cfg.SPLIT_YAML_PATH):
+        cfg.SPLIT_YAML_PATH = os.path.join(cfg.PROJECT_DIR, cfg.SPLIT_YAML_PATH)
 
     # Resolve DAG prompt path
     if cfg.PLAN_PROMPT:
@@ -625,119 +537,10 @@ def _checkpoint_source_label(source: str) -> str:
 def _validate(cfg: Config) -> None:
     """Run all startup validations. Raises ValueError on failure."""
 
-    # TabFact guardrail
-    for path_field in _DATASET_PATH_FIELDS:
-        val = getattr(cfg, path_field, "")
-        if val and "tabfact" in val.lower():
-            raise ValueError(
-                "TabFact+ is not supported in nlp_project; please choose "
-                "WikiTQ-4k/WikiTQ+/Scalability or provide a non-TabFact "
-                "custom dataset."
-            )
-
-    # Scalability requires explicit_indices mode
-    if cfg.DATASET in ("DATASET_SCALABILITY",) and cfg.SPLIT_MODE == "seeded_ratio":
-        raise ValueError(
-            "Scalability dataset requires SPLIT_MODE_EXPLICIT_INDICES "
-            "(multi-file dataset)."
-        )
-
-    # Split mode compatibility with training mode
-    if cfg.TRAINING_MODE == "TRAINING_MODE_OVERFIT_POC":
-        if cfg.SPLIT_MODE != "overfit_poc":
-            logger.warning(
-                "TRAINING_MODE_OVERFIT_POC forces SPLIT_MODE to overfit_poc "
-                "(was %s)", cfg.SPLIT_MODE,
-            )
-            cfg.SPLIT_MODE = "overfit_poc"
-    elif cfg.TRAINING_MODE == "TRAINING_MODE_GRPO":
-        if cfg.SPLIT_MODE == "overfit_poc":
-            raise ValueError(
-                "SPLIT_MODE_OVERFIT_POC is valid only with "
-                "TRAINING_MODE_OVERFIT_POC, not TRAINING_MODE_GRPO."
-            )
-
     # Fewshot file existence check
     for fpath in cfg.fewshot_files:
         if not os.path.isfile(fpath):
             raise ValueError(f"Few-shot file not found: {fpath}")
-
-    # Cross-split overlap check for explicit_indices mode
-    if cfg.SPLIT_MODE == "explicit_indices":
-        _validate_explicit_indices(cfg)
-
-
-def _validate_explicit_indices(cfg: Config) -> None:
-    """Validate explicit-index splits: bounds and cross-split disjointness."""
-
-    dataset_split_map = {
-        "wikitq_4k": {
-            "train": ("SPLIT_TRAIN_WIKITQ_4K_INDICES", "train"),
-            "valid": ("SPLIT_VALID_WIKITQ_4K_INDICES", "valid"),
-            "test":  ("SPLIT_TEST_WIKITQ_4K_INDICES", "test"),
-        },
-        "wikitq_plus": {
-            "train": ("SPLIT_TRAIN_WIKITQ_PLUS_INDICES", "train"),
-            "valid": ("SPLIT_VALID_WIKITQ_PLUS_INDICES", "valid"),
-            "test":  ("SPLIT_TEST_WIKITQ_PLUS_INDICES", "test"),
-        },
-        "scalability": {
-            "train": ("SPLIT_TRAIN_SCALABILITY_INDICES", "all"),
-            "valid": ("SPLIT_VALID_SCALABILITY_INDICES", "all"),
-            "test":  ("SPLIT_TEST_SCALABILITY_INDICES", "all"),
-        },
-    }
-
-    from src.training.dataset_registry import count_examples
-
-    # Collect all (source_dataset, source_file, source_index) triples per split
-    split_triples: dict[str, set[tuple[str, str, int]]] = {
-        "train": set(), "valid": set(), "test": set(),
-    }
-
-    for dataset_key, split_info in dataset_split_map.items():
-        for split_name, (field_name, canonical_split) in split_info.items():
-            indices = getattr(cfg, field_name)
-            if not indices:
-                continue
-
-            # Bounds check
-            total = count_examples(dataset_key, canonical_split, cfg.AIXELASK_ROOT)
-            for idx in indices:
-                if idx < 0 or idx >= total:
-                    raise ValueError(
-                        f"Index {idx} out of range for {dataset_key} "
-                        f"(max {total - 1})"
-                    )
-
-            # Determine source_file for overlap tracking
-            if dataset_key == "scalability":
-                source_file = "all"
-            else:
-                from src.training.dataset_registry import DATASET_REGISTRY
-                rel_path = DATASET_REGISTRY[dataset_key][canonical_split]
-                source_file = os.path.basename(rel_path)
-
-            for idx in indices:
-                split_triples[split_name].add(
-                    (dataset_key, source_file, idx)
-                )
-
-    # Cross-split disjointness
-    splits = ["train", "valid", "test"]
-    overlaps: list[str] = []
-    for i, s1 in enumerate(splits):
-        for s2 in splits[i + 1:]:
-            common = split_triples[s1] & split_triples[s2]
-            for triple in sorted(common):
-                overlaps.append(
-                    f"  ({triple[0]}, {triple[1]}, {triple[2]}) in "
-                    f"both {s1} and {s2}"
-                )
-    if overlaps:
-        raise ValueError(
-            "Cross-split overlap detected:\n" + "\n".join(overlaps)
-        )
 
 
 # ---------------------------------------------------------------------------

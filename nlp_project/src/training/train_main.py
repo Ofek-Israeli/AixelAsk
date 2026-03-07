@@ -95,7 +95,6 @@ def main() -> None:
         "generation_seed": config.GENERATION_SEED,
         "reward_seed": config.REWARD_SEED,
         "eval_seed": config.EVAL_SEED,
-        "split_seed": config.TRAIN_SPLIT_SEED,
     }
 
     if config.SAVE_RESOLVED_SEEDS:
@@ -129,7 +128,7 @@ def main() -> None:
     # ==================================================================
     from src.training.split_utils import build_splits
 
-    logger.info("Building train/valid splits (mode=%s)...", config.SPLIT_MODE)
+    logger.info("Building train/valid splits from YAML...")
     split_result = build_splits(config)
     logger.info(
         "Split result: train=%d, valid=%d, test=%d",

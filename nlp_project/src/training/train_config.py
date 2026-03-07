@@ -1,29 +1,21 @@
-"""Training-specific configuration: extends base Config with split indices
-and builds TRL ``GRPOConfig`` from Kconfig symbols.
+"""Training-specific configuration: builds TRL ``GRPOConfig`` from Kconfig symbols.
 
-``TrainConfig`` is a thin wrapper that augments the base ``Config`` with
-structured per-dataset split index dicts.  ``build_grpo_config`` translates
-Kconfig ``CONFIG_GRPO_*`` symbols into the ``GRPOConfig`` dataclass expected
-by TRL's ``GRPOTrainer``.
+``TrainConfig`` is a thin wrapper around the base ``Config``.
+``build_grpo_config`` translates ``CONFIG_GRPO_*`` symbols into the
+``GRPOConfig`` dataclass expected by TRL's ``GRPOTrainer``.
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Dict, List
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from src.config import Config
 
 logger = logging.getLogger(__name__)
 
-_DATASET_KEYS = ("wikitq_4k", "wikitq_plus", "scalability")
-
-
-# ---------------------------------------------------------------------------
-# TrainConfig
-# ---------------------------------------------------------------------------
 
 @dataclass
 class TrainConfig:
@@ -34,43 +26,14 @@ class TrainConfig:
 
     base: "Config" = field(repr=False)
 
-    split_mode: str = "seeded_ratio"
-
-    split_train_indices: Dict[str, List[int]] = field(default_factory=dict)
-    split_valid_indices: Dict[str, List[int]] = field(default_factory=dict)
-    split_test_indices: Dict[str, List[int]] = field(default_factory=dict)
-
     @classmethod
     def from_config(cls, config: "Config") -> "TrainConfig":
         """Build a ``TrainConfig`` from a fully-resolved base ``Config``."""
-        train_indices: Dict[str, List[int]] = {
-            "wikitq_4k": list(config.SPLIT_TRAIN_WIKITQ_4K_INDICES),
-            "wikitq_plus": list(config.SPLIT_TRAIN_WIKITQ_PLUS_INDICES),
-            "scalability": list(config.SPLIT_TRAIN_SCALABILITY_INDICES),
-        }
-        valid_indices: Dict[str, List[int]] = {
-            "wikitq_4k": list(config.SPLIT_VALID_WIKITQ_4K_INDICES),
-            "wikitq_plus": list(config.SPLIT_VALID_WIKITQ_PLUS_INDICES),
-            "scalability": list(config.SPLIT_VALID_SCALABILITY_INDICES),
-        }
-        test_indices: Dict[str, List[int]] = {
-            "wikitq_4k": list(config.SPLIT_TEST_WIKITQ_4K_INDICES),
-            "wikitq_plus": list(config.SPLIT_TEST_WIKITQ_PLUS_INDICES),
-            "scalability": list(config.SPLIT_TEST_SCALABILITY_INDICES),
-        }
-
-        return cls(
-            base=config,
-            split_mode=config.SPLIT_MODE,
-            split_train_indices=train_indices,
-            split_valid_indices=valid_indices,
-            split_test_indices=test_indices,
-        )
+        return cls(base=config)
 
     def __getattr__(self, name: str):
         """Proxy attribute access to the base Config for convenience."""
-        if name in ("base", "split_mode", "split_train_indices",
-                     "split_valid_indices", "split_test_indices"):
+        if name == "base":
             raise AttributeError(name)
         return getattr(self.base, name)
 

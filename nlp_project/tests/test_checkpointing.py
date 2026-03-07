@@ -49,7 +49,6 @@ class _StubConfig:
     TRAIN_LORA_TARGET_MODULES: str = "q_proj,v_proj"
     TRAIN_LORA_DROPOUT: float = 0.05
     TRAIN_USE_4BIT: bool = True
-    SPLIT_MODE: str = "explicit_indices"
     REWARD_MODE: str = "weighted"
     REWARD_WEIGHT_CORRECTNESS: float = 1.0
     REWARD_WEIGHT_VALIDITY: float = 0.5
