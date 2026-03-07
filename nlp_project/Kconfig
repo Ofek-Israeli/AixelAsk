@@ -1,0 +1,13 @@
+mainmenu "AixelAsk Local Pipeline Configuration"
+
+source "Kconfig.model"
+source "Kconfig.server"
+source "Kconfig.dataset"
+source "Kconfig.split"
+source "Kconfig.retrieval"
+source "Kconfig.output"
+source "Kconfig.runtime"
+source "Kconfig.dagstats"
+source "Kconfig.training"
+source "Kconfig.training_stats"
+source "Kconfig.test_trained"
