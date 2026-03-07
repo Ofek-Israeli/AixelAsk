@@ -182,13 +182,10 @@ def main() -> None:
     import scripts.save_embeddings as save_embeddings
     import scripts.final_reasoning_multi_thread_save_embedding as frm
 
-    col_prompt_path = config.COL_PROMPT
-    col_prompt = ""
-    if col_prompt_path and os.path.isfile(col_prompt_path):
-        with open(col_prompt_path, "r") as f:
-            col_prompt = f.read()
-
-    _precompute_table_embeddings(split_result.train, save_embeddings, col_prompt)
+    _precompute_table_embeddings(
+        split_result.train, save_embeddings,
+        config.EMBEDDING_CACHE, config.COL_PROMPT,
+    )
 
     table_embedding_map = frm.load_table_embedding_map(config.EMBEDDING_CACHE)
     logger.info("Loaded %d table embeddings from cache.", len(table_embedding_map))
@@ -322,14 +319,27 @@ def _resolve_resume_path(args, config) -> Optional[str]:
     return None
 
 
-def _precompute_table_embeddings(train_ds, save_embeddings_mod, col_prompt: str) -> None:
+def _precompute_table_embeddings(
+    train_ds, save_embeddings_mod, cache_path: str, col_prompt_path: str,
+) -> None:
     """Precompute embeddings for all tables in the training dataset."""
+    import json
+    import tempfile
+
     try:
-        examples = []
-        for i in range(len(train_ds)):
-            ex = train_ds[i]
-            examples.append(ex)
-        save_embeddings_mod.process_table_embeddings(examples, col_prompt)
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".jsonl", delete=False, encoding="utf-8",
+        ) as tmp:
+            for i in range(len(train_ds)):
+                ex = train_ds[i]
+                tmp.write(json.dumps(dict(ex), ensure_ascii=False) + "\n")
+            tmp_path = tmp.name
+        try:
+            save_embeddings_mod.process_table_embeddings(
+                tmp_path, cache_path, col_prompt_path,
+            )
+        finally:
+            os.unlink(tmp_path)
     except Exception:
         logger.warning("Table embedding precomputation failed", exc_info=True)
 

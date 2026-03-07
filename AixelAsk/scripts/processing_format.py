@@ -7,64 +7,73 @@ from utils.processing import sample_table_rows
 
 
 def get_row_template(table, prompt):
-    # Randomly sample rows from the table
-    header, sampled_rows = sample_table_rows(table)
-    markdown_header = "| " + " | ".join(header) + " |\n"
-    markdown_rows = ""
-    for row in sampled_rows:
-        markdown_rows += "| " + " | ".join(row) + " |\n"
+    prompt_template = prompt
+    max_attempts = 10
 
-    # Generate the prompt for the row template
-    prompt = prompt.format(header=markdown_header, sampled_rows=markdown_rows)
-    # print(prompt)
-
-    max_attempts = 10  # Limit retry attempts
     for attempt in range(max_attempts):
-        row_template = request_gpt_chat(prompt=prompt)
+        header, sampled_rows = sample_table_rows(table)
+        markdown_header = "| " + " | ".join(header) + " |\n"
+        markdown_rows = ""
+        for row in sampled_rows:
+            markdown_rows += "| " + " | ".join(row) + " |\n"
 
-        # Validate the generated output
+        filled_prompt = prompt_template.format(header=markdown_header, sampled_rows=markdown_rows)
+        row_template = request_gpt_chat(prompt=filled_prompt)
+
         if validate_row_template(row_template, header):
             return row_template
-        else:
-            print(f"Attempt {attempt + 1}: Generated row template does not match the expected format, retrying...")
-            # print("Wrong row template:", row_template)
+        print(f"Attempt {attempt + 1}: Generated row template does not match the expected format, retrying...")
+
     raise ValueError("Failed to generate row template in the expected format after multiple attempts.")
 
 
 def get_col_template(table, prompt):
-    # Randomly sample rows from the table
-    header, sampled_rows = sample_table_rows(table)
-    markdown_header = "| " + " | ".join(header) + " |\n"
-    markdown_rows = ""
-    for row in sampled_rows:
-        markdown_rows += "| " + " | ".join(row) + " |\n"
+    prompt_template = prompt
+    header = table[0]
+    max_attempts = 10
 
-    # Generate the prompt for the column template
-    prompt = prompt.format(header=markdown_header, sampled_rows=markdown_rows)
-    # print(prompt)
-
-    max_attempts = 10  # Limit retry attempts
     for attempt in range(max_attempts):
+        _, sampled_rows = sample_table_rows(table)
+        markdown_header = "| " + " | ".join(header) + " |\n"
+        markdown_rows = ""
+        for row in sampled_rows:
+            markdown_rows += "| " + " | ".join(row) + " |\n"
 
-        col_template = request_gpt_chat(prompt=prompt)
-        # Validate the generated output
-        if validate_col_template(col_template, header):
-            return col_template
-        else:
-            print(f"Attempt {attempt + 1}: Generated template does not match the expected format, retrying...")
-            # print("Wrong col template:", col_template)
-    raise ValueError("Failed to generate column template in the expected format after multiple attempts.")
+        filled_prompt = prompt_template.format(header=markdown_header, sampled_rows=markdown_rows)
+        col_template = request_gpt_chat(prompt=filled_prompt)
+
+        cleaned = _extract_col_lines(col_template)
+        if validate_col_template(cleaned, header):
+            return cleaned
+        print(f"Attempt {attempt + 1}/{max_attempts}: col template invalid "
+              f"(got {len(col_template.strip().splitlines())} lines, need {len(header)}), retrying...")
+
+    print(f"All {max_attempts} attempts failed; falling back to header-only descriptions.")
+    return _fallback_col_template(header)
+
+
+def _extract_col_lines(raw: str) -> str:
+    """Extract only lines matching ``Col\\d+ ## …`` from the model output,
+    filtering blank lines and preamble text."""
+    pattern = re.compile(r"^Col\d+\s*##\s*.+:\s*.+", re.IGNORECASE)
+    lines = [ln.strip() for ln in raw.strip().splitlines() if pattern.match(ln.strip())]
+    return "\n".join(lines)
+
+
+def _fallback_col_template(header):
+    """Generate a minimal valid col template from header names when the LLM
+    fails to produce one."""
+    lines = []
+    for i, col_name in enumerate(header):
+        lines.append(f"Col{i + 1} ## {col_name}: Values in the {col_name} column.")
+    return "\n".join(lines)
 
 
 def validate_col_template(col_template, header):
     """Validate that each column description is on one line and follows the required format."""
-    # Define a regex pattern for format matching
-    pattern = r"^Col\d+ ## .+: .+(\n|$)"
-
-    # Split the generated template and validate each line
+    pattern = r"^Col\d+\s*##\s*.+:\s*.+"
     col_template_lines = col_template.strip().splitlines()
 
-    # Check whether each column has one valid description line
     if len(col_template_lines) == len(header) and all(re.match(pattern, line) for line in col_template_lines):
         return True
     return False

@@ -13,6 +13,7 @@ import json
 import logging
 import math
 import os
+import tempfile
 import threading
 import time
 from collections import defaultdict
@@ -121,7 +122,8 @@ def run(
     # Step 1 — Compute embeddings
     # ==================================================================
     logger.info("Step 1: computing table embeddings …")
-    save_embeddings.process_table_embeddings(test_examples, config.COL_PROMPT)
+    _compute_embeddings(test_examples, config.EMBEDDING_CACHE, config.COL_PROMPT,
+                        save_embeddings)
 
     # ==================================================================
     # Step 1a — Load embedding cache
@@ -430,6 +432,33 @@ def _write_telemetry_summary(
         json.dump(summary, f, indent=2)
     logger.info("Telemetry summary written to %s", summary_path)
     return os.path.abspath(summary_path)
+
+
+# ---------------------------------------------------------------------------
+# Embedding pre-computation
+# ---------------------------------------------------------------------------
+
+def _compute_embeddings(
+    examples: List[dict],
+    cache_path: str,
+    col_prompt_path: str,
+    save_embeddings_mod,
+) -> None:
+    """Write *examples* to a temp JSONL file and delegate to the upstream
+    ``process_table_embeddings(input_path, output_path, col_prompt_path)``.
+    """
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".jsonl", delete=False, encoding="utf-8",
+    ) as tmp:
+        for ex in examples:
+            tmp.write(json.dumps(ex, ensure_ascii=False) + "\n")
+        tmp_path = tmp.name
+    try:
+        save_embeddings_mod.process_table_embeddings(
+            tmp_path, cache_path, col_prompt_path,
+        )
+    finally:
+        os.unlink(tmp_path)
 
 
 # ---------------------------------------------------------------------------

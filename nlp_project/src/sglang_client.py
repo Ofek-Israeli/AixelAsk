@@ -46,7 +46,12 @@ class SglangClient:
         self._semaphore = threading.Semaphore(config.SGLANG_CLIENT_CONCURRENCY)
 
         base_url = f"http://{config.SGLANG_HOST}:{config.SGLANG_PORT}/v1"
-        self._client = OpenAI(api_key="EMPTY", base_url=base_url)
+        self._client = OpenAI(
+            api_key="EMPTY",
+            base_url=base_url,
+            timeout=60.0,
+            max_retries=0,
+        )
 
         # Pre-build the static portion of sampling params
         self._standard_params: Dict[str, Any] = {

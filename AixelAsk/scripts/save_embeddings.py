@@ -96,6 +96,11 @@ def save_embeddings(index, line, col_prompt, seen_table_ids, lock):
 
 
 def process_table_embeddings(input_path, output_path, col_prompt_path):
+    """Two-phase embedding: generate descriptions (LLM), then embed (local model).
+
+    Separating phases avoids GPU contention between the SGLang LLM and the
+    local embedding model, which causes SGLang to deadlock on Blackwell GPUs.
+    """
     with open(input_path, 'r', encoding='utf-8') as f:
         data = f.readlines()
 
@@ -103,23 +108,63 @@ def process_table_embeddings(input_path, output_path, col_prompt_path):
         col_prompt = f.read()
 
     seen_table_ids = load_existing_table_ids(output_path)
-    print(f"🔄 Loaded {len(seen_table_ids)} existing table_ids from {output_path}.")
+    print(f"Loaded {len(seen_table_ids)} existing table_ids from {output_path}.")
 
-    lock = threading.Lock()
+    # ------------------------------------------------------------------
+    # Phase 1: Generate descriptions using the LLM (no embedding calls)
+    # ------------------------------------------------------------------
+    print(f"Phase 1/2: generating descriptions for {len(data)} items (LLM only) ...")
+    pending = []
+    for idx, line in enumerate(tqdm(data, desc="Phase 1: descriptions")):
+        try:
+            item = json.loads(line)
+            table = item["table_text"]
+            statement = item["statement"]
+            table_id = get_table_id_from_text(table)
 
+            if table_id in seen_table_ids:
+                continue
+            seen_table_ids.add(table_id)
+
+            cleaned_table = clean_table(table)
+            row_descriptions = get_row_flattened(cleaned_table)
+            col_descriptions = get_col_description(cleaned_table, col_prompt)
+
+            pending.append({
+                "table_id": table_id,
+                "statement": statement,
+                "row_descriptions": row_descriptions,
+                "col_descriptions": col_descriptions,
+                "table_text": table,
+            })
+        except Exception as exc:
+            print(f"Phase 1: skipping index {idx}: {exc}")
+            continue
+
+    print(f"Phase 1 complete: {len(pending)} tables need embeddings.")
+
+    # ------------------------------------------------------------------
+    # Phase 2: Compute vector embeddings (local model only, no LLM)
+    # ------------------------------------------------------------------
+    print("Phase 2/2: computing vector embeddings (local model only) ...")
     with open(output_path, 'a', encoding='utf-8') as fout:
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            futures = [
-                executor.submit(save_embeddings, idx, line, col_prompt, seen_table_ids, lock)
-                for idx, line in enumerate(data)
-            ]
+        for entry in tqdm(pending, desc="Phase 2: embeddings"):
+            try:
+                row_embeddings = get_embeddings(
+                    entry["row_descriptions"], request_gpt_embedding,
+                )
+                col_embeddings = get_embeddings(
+                    entry["col_descriptions"], request_gpt_embedding,
+                )
+                entry["row_embeddings"] = row_embeddings
+                entry["col_embeddings"] = col_embeddings
+                fout.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                fout.flush()
+            except Exception as exc:
+                print(f"Phase 2: skipping table {entry['table_id']}: {exc}")
+                continue
 
-            for future in tqdm(as_completed(futures), total=len(futures), desc=f"Saving embeddings to {output_path}"):
-                result = future.result()
-                if result and result["table_id"]:
-                    fout.write(json.dumps(result, ensure_ascii=False) + "\n")
-
-    print(f"✅ All new table embeddings appended to {output_path}")
+    print(f"All new table embeddings appended to {output_path}")
 
 
 def main():
