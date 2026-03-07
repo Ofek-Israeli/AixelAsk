@@ -11,9 +11,9 @@ Orchestrates the full startup → evaluate → shutdown lifecycle:
 3.  If ``--download-only``: download models and exit.
 3a. Resolve model path.
 3b. Bootstrap upstream imports (``sys.path``).
-4.  Register ``atexit(sglang_server.stop)``.
-5.  Start SGLang server.
-6.  Init ``sglang_client`` + ``embedding_client``.
+4.  Register ``atexit(inference_server.stop)``.
+5.  Start inference server (SGLang or vLLM).
+6.  Init ``llm_client`` + ``embedding_client``.
 7.  Create semaphores (passed to clients at init).
 7a. Create runtime objects (``call_recorder``, stores, ``dag_stats``).
 8.  Apply monkey-patches (order matters).
@@ -86,33 +86,32 @@ def main() -> None:
     logger.info("Upstream imports bootstrapped (sys.path updated).")
 
     # ==================================================================
-    # 4. Register atexit(sglang_server.stop)
+    # 4. Register atexit(inference_server.stop)
     # ==================================================================
-    from src import sglang_server
+    from src import inference_server
 
-    atexit.register(sglang_server.stop)
-
-    # ==================================================================
-    # 5. Start SGLang server
-    # ==================================================================
-    logger.info("Starting SGLang server …")
-    sglang_server.start(config, resolved_model_path)
+    atexit.register(inference_server.stop, config)
 
     # ==================================================================
-    # 6. Init sglang_client + embedding_client
+    # 5. Start inference server
     # ==================================================================
-    from src.sglang_client import SglangClient
+    inference_server.start(config, resolved_model_path)
+
+    # ==================================================================
+    # 6. Init llm_client + embedding_client
+    # ==================================================================
+    from src.llm_client import LlmClient
     from src.embedding_client import EmbeddingClient
 
-    logger.info("Initialising SGLang client …")
-    sglang_client = SglangClient(config, resolved_model_path)
+    logger.info("Initialising LLM client …")
+    llm_client = LlmClient(config, resolved_model_path)
 
     logger.info("Initialising embedding client …")
     embedding_client = EmbeddingClient(config)
 
     # ==================================================================
     # 7. Semaphores are created inside client constructors already
-    #    (SglangClient uses CONFIG_SGLANG_CLIENT_CONCURRENCY,
+    #    (LlmClient uses CONFIG_CLIENT_CONCURRENCY,
     #     EmbeddingClient uses CONFIG_GLOBAL_EMBEDDING_CONCURRENCY)
     # ==================================================================
 
@@ -145,7 +144,7 @@ def main() -> None:
 
     # 8a. Route LLM + embedding calls to local models
     patch_request_gpt.init_patches(
-        sglang_client, embedding_client, config, call_recorder=call_recorder,
+        llm_client, embedding_client, config, call_recorder=call_recorder,
     )
 
     # 8b. Override DAG generation prompt + capture metadata
@@ -184,9 +183,9 @@ def main() -> None:
         logger.info("DAG stats → %s", result.dag_stats_file)
 
     # ==================================================================
-    # 10. Stop SGLang server
+    # 10. Stop inference server
     # ==================================================================
-    sglang_server.stop()
+    inference_server.stop(config)
 
 
 # ---------------------------------------------------------------------------

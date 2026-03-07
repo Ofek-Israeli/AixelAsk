@@ -18,14 +18,14 @@ Flow:
 3.  If adapter-only: merge to temp dir, register ``atexit`` cleanup.
 4.  Set runtime overrides (``serving_model_path``, output paths).
 5.  Setup logging.
-6.  Register ``atexit(sglang_server.stop)``.
-7.  Start SGLang with ``serving_model_path``.
+6.  Register ``atexit(inference_server.stop)``.
+7.  Start inference server with ``serving_model_path``.
 8.  Init clients.
 9.  Create runtime coordination objects.
 10. Apply ALL monkey-patches.
 11. ``pipeline.run()`` — TEST SPLIT ONLY.
 12. Write ``test_eval_summary.json``.
-13. Stop SGLang server.
+13. Stop inference server.
 """
 
 from __future__ import annotations
@@ -136,25 +136,25 @@ def main() -> None:
     )
 
     # ==================================================================
-    # 6. Register atexit(sglang_server.stop)
+    # 6. Register atexit(inference_server.stop)
     # ==================================================================
-    from src import sglang_server
+    from src import inference_server
 
-    atexit.register(sglang_server.stop)
+    atexit.register(inference_server.stop, config)
 
     # ==================================================================
-    # 7. Start SGLang with serving_model_path
+    # 7. Start inference server with serving_model_path
     # ==================================================================
-    logger.info("Starting SGLang server with trained model...")
-    sglang_server.start(config, serving_model_path)
+    logger.info("Starting inference server with trained model...")
+    inference_server.start(config, serving_model_path)
 
     # ==================================================================
     # 8. Init clients
     # ==================================================================
-    from src.sglang_client import SglangClient
+    from src.llm_client import LlmClient
     from src.embedding_client import EmbeddingClient
 
-    sglang_client = SglangClient(config, serving_model_path)
+    llm_client = LlmClient(config, serving_model_path)
     embedding_client = EmbeddingClient(config)
 
     # ==================================================================
@@ -185,7 +185,7 @@ def main() -> None:
     from src.dag_executor import DagExecutor
 
     patch_request_gpt.init_patches(
-        sglang_client, embedding_client, config, call_recorder=call_recorder,
+        llm_client, embedding_client, config, call_recorder=call_recorder,
     )
     patch_dag.init_patches(
         config, call_recorder=call_recorder, dag_metadata_store=dag_metadata_store,
@@ -256,9 +256,9 @@ def main() -> None:
     logger.info("Test evaluation summary written to %s", summary_path)
 
     # ==================================================================
-    # 13. Stop SGLang server
+    # 13. Stop inference server
     # ==================================================================
-    sglang_server.stop()
+    inference_server.stop(config)
     logger.info("Post-training test pipeline complete.")
 
 

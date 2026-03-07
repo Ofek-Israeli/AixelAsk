@@ -47,7 +47,7 @@ class TestConfigParsing:
         with mock.patch("src.config._validate"):
             cfg = load_config(DEFCONFIG)
 
-        assert isinstance(cfg.SGLANG_PORT, int)
+        assert isinstance(cfg.SERVER_PORT, int)
         assert isinstance(cfg.LLM_TEMPERATURE, float)
         assert isinstance(cfg.TRUST_REMOTE_CODE, bool)
         assert isinstance(cfg.INFERENCE_MODEL, str)
@@ -107,7 +107,7 @@ class TestConfigParsing:
         with mock.patch("src.config._validate"):
             cfg = load_config(DEFCONFIG)
 
-        assert cfg.SGLANG_PORT == 30000
+        assert cfg.SERVER_PORT == 30000
         assert cfg.PROJECT_DIR == PROJECT_DIR
 
 

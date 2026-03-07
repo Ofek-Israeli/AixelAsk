@@ -53,7 +53,7 @@ def _hybrid_dag():
 @dataclass
 class _StubConfig:
     DAG_NODE_MAX_INFLIGHT: int = 16
-    SGLANG_CLIENT_CONCURRENCY: int = 32
+    CLIENT_CONCURRENCY: int = 32
 
 
 # ---------------------------------------------------------------------------

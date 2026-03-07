@@ -153,18 +153,18 @@ def main() -> None:
     logger.info("Upstream imports bootstrapped.")
 
     # ==================================================================
-    # 5c. Start SGLang server + init clients
+    # 5c. Start inference server + init clients
     # ==================================================================
-    from src import sglang_server
-    from src.sglang_client import SglangClient
+    from src import inference_server
+    from src.llm_client import LlmClient
     from src.embedding_client import EmbeddingClient
 
-    atexit.register(sglang_server.stop)
+    atexit.register(inference_server.stop, config)
 
-    logger.info("Starting SGLang server for reward-time DAG execution...")
-    sglang_server.start(config, resolved_model_path)
+    logger.info("Starting inference server for reward-time DAG execution...")
+    inference_server.start(config, resolved_model_path)
 
-    sglang_client = SglangClient(config, resolved_model_path)
+    llm_client = LlmClient(config, resolved_model_path)
     embedding_client = EmbeddingClient(config)
 
     # ==================================================================
@@ -172,7 +172,7 @@ def main() -> None:
     # ==================================================================
     from src import patch_request_gpt
 
-    patch_request_gpt.init_patches(sglang_client, embedding_client, config)
+    patch_request_gpt.init_patches(llm_client, embedding_client, config)
     logger.info("Applied patch_request_gpt (training mode — no patch_dag, no patch_dag_execution).")
 
     # ==================================================================
@@ -273,9 +273,9 @@ def main() -> None:
             logger.warning("Final curves compilation failed (non-fatal)", exc_info=True)
 
     # ==================================================================
-    # 13. Stop SGLang server
+    # 13. Stop inference server
     # ==================================================================
-    sglang_server.stop()
+    inference_server.stop(config)
     logger.info("Training pipeline complete.")
 
 
@@ -324,8 +324,12 @@ def _precompute_table_embeddings(
 ) -> None:
     """Precompute embeddings for all tables in the training dataset."""
     import json
+    import os
     import tempfile
 
+    stats_output_path = os.path.join(
+        os.path.dirname(cache_path), "embedding_run_summary.json"
+    )
     try:
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".jsonl", delete=False, encoding="utf-8",
@@ -337,6 +341,7 @@ def _precompute_table_embeddings(
         try:
             save_embeddings_mod.process_table_embeddings(
                 tmp_path, cache_path, col_prompt_path,
+                stats_output_path=stats_output_path,
             )
         finally:
             os.unlink(tmp_path)

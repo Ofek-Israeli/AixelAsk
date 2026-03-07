@@ -66,8 +66,8 @@ def start(config: Config, resolved_model_path: str) -> None:
     """
     global _server_process
 
-    host = config.SGLANG_HOST
-    port = config.SGLANG_PORT
+    host = config.SERVER_HOST
+    port = config.SERVER_PORT
     base_url = f"http://localhost:{port}"
 
     # Set CUDA_VISIBLE_DEVICES if configured
@@ -77,7 +77,7 @@ def start(config: Config, resolved_model_path: str) -> None:
 
     # Check for port conflict
     if _port_in_use("localhost", port):
-        if _probe_health(base_url, config.SGLANG_HEALTH_ENDPOINT) or _probe_health(base_url, "/v1/models"):
+        if _probe_health(base_url, config.SERVER_HEALTH_ENDPOINT) or _probe_health(base_url, "/v1/models"):
             logger.warning(
                 "Port %d already in use by a healthy SGLang server — reusing.",
                 port,
@@ -94,10 +94,10 @@ def start(config: Config, resolved_model_path: str) -> None:
         "--model-path", resolved_model_path,
         "--host", host,
         "--port", str(port),
-        "--tp-size", str(config.SGLANG_TP_SIZE),
-        "--dtype", config.SGLANG_DTYPE,
+        "--tp-size", str(config.SERVER_TP_SIZE),
+        "--dtype", config.SERVER_DTYPE,
         "--mem-fraction-static", config.SGLANG_MEM_FRACTION,
-        "--context-length", str(config.SGLANG_CONTEXT_LENGTH),
+        "--context-length", str(config.SERVER_CONTEXT_LENGTH),
     ]
     if config.SGLANG_EXTRA_ARGS:
         import shlex
@@ -122,10 +122,10 @@ def start(config: Config, resolved_model_path: str) -> None:
     atexit.register(stop)
 
     # Health-check polling
-    primary_endpoint = config.SGLANG_HEALTH_ENDPOINT
+    primary_endpoint = config.SERVER_HEALTH_ENDPOINT
     fallback_endpoint = "/v1/models"
-    interval = config.SGLANG_HEALTH_INTERVAL
-    timeout = config.SGLANG_HEALTH_TIMEOUT
+    interval = config.SERVER_HEALTH_INTERVAL
+    timeout = config.SERVER_HEALTH_TIMEOUT
 
     deadline = time.monotonic() + timeout
     use_fallback = False

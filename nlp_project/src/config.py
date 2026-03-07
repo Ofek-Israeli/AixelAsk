@@ -1,6 +1,6 @@
 """Parse Kconfig-generated ``.config`` into a Python dataclass.
 
-Reads lines like ``CONFIG_SGLANG_PORT=30000``, strips quotes from strings,
+Reads lines like ``CONFIG_SERVER_PORT=30000``, strips quotes from strings,
 casts ints, handles ``y``/``n`` as bools.  All other modules import from here.
 
 CLI override semantics (``--override KEY=VALUE``):
@@ -79,16 +79,19 @@ class Config:
     NOMIC_PREFIX_MODE: str = "AUTO"
 
     # -- Kconfig.server ----------------------------------------------------
-    SGLANG_HOST: str = "0.0.0.0"
-    SGLANG_PORT: int = 30000
-    SGLANG_TP_SIZE: int = 1
+    INFERENCE_BACKEND: str = "SGLANG"
+    SERVER_HOST: str = "0.0.0.0"
+    SERVER_PORT: int = 30000
+    SERVER_TP_SIZE: int = 1
+    SERVER_DTYPE: str = "float16"
+    SERVER_CONTEXT_LENGTH: int = 8192
+    SERVER_HEALTH_TIMEOUT: int = 300
+    SERVER_HEALTH_INTERVAL: int = 5
+    SERVER_HEALTH_ENDPOINT: str = "/health"
     SGLANG_MEM_FRACTION: str = "0.85"
-    SGLANG_DTYPE: str = "float16"
-    SGLANG_CONTEXT_LENGTH: int = 8192
     SGLANG_EXTRA_ARGS: str = ""
-    SGLANG_HEALTH_TIMEOUT: int = 300
-    SGLANG_HEALTH_INTERVAL: int = 5
-    SGLANG_HEALTH_ENDPOINT: str = "/health"
+    VLLM_GPU_MEMORY_UTILIZATION: str = "0.85"
+    VLLM_EXTRA_ARGS: str = ""
 
     # -- Split (always from train_valid_test.yaml) -------------------------
     SPLIT_YAML_PATH: str = "train_valid_test.yaml"
@@ -138,7 +141,7 @@ class Config:
     RETRIEVAL_PARALLELISM: int = 8
     RETRIEVAL_EMBED_BATCH_SIZE: int = 32
     REASONING_PARALLELISM: int = 8
-    SGLANG_CLIENT_CONCURRENCY: int = 32
+    CLIENT_CONCURRENCY: int = 32
     GLOBAL_EMBEDDING_CONCURRENCY: int = 4
 
     # -- Kconfig.dagstats --------------------------------------------------
@@ -262,15 +265,15 @@ _FLOAT_FIELDS = {
 
 # Fields parsed as int
 _INT_FIELDS = {
-    "CONFIG_SGLANG_PORT", "CONFIG_SGLANG_TP_SIZE", "CONFIG_SGLANG_CONTEXT_LENGTH",
-    "CONFIG_SGLANG_HEALTH_TIMEOUT", "CONFIG_SGLANG_HEALTH_INTERVAL",
+    "CONFIG_SERVER_PORT", "CONFIG_SERVER_TP_SIZE", "CONFIG_SERVER_CONTEXT_LENGTH",
+    "CONFIG_SERVER_HEALTH_TIMEOUT", "CONFIG_SERVER_HEALTH_INTERVAL",
     "CONFIG_DAG_MAX_RETRIES", "CONFIG_NUM_SAMPLE_ROWS",
     "CONFIG_MAX_WORKERS", "CONFIG_LLM_MAX_OUTPUT_TOKENS", "CONFIG_LLM_RETRIES",
     "CONFIG_LLM_TOP_K", "CONFIG_LLM_SEED",
     "CONFIG_EMBEDDING_BATCH_SIZE", "CONFIG_EMBEDDING_RETRIES",
     "CONFIG_DAG_NODE_MAX_INFLIGHT", "CONFIG_RETRIEVAL_PARALLELISM",
     "CONFIG_RETRIEVAL_EMBED_BATCH_SIZE", "CONFIG_REASONING_PARALLELISM",
-    "CONFIG_SGLANG_CLIENT_CONCURRENCY", "CONFIG_GLOBAL_EMBEDDING_CONCURRENCY",
+    "CONFIG_CLIENT_CONCURRENCY", "CONFIG_GLOBAL_EMBEDDING_CONCURRENCY",
     "CONFIG_LOG_LLM_CALLS_MAX_CHARS",
     "CONFIG_GLOBAL_SEED", "CONFIG_TRAINING_SEED", "CONFIG_DATALOADER_SEED",
     "CONFIG_GENERATION_SEED", "CONFIG_REWARD_SEED", "CONFIG_EVAL_SEED",
@@ -429,6 +432,12 @@ def load_config(
             setattr(cfg, field_name, float(raw_value))
         else:
             setattr(cfg, field_name, raw_value)
+
+    # Inference backend choice
+    if raw.get("CONFIG_BACKEND_VLLM", "").lower() in ("y", "yes", "true", "1"):
+        cfg.INFERENCE_BACKEND = "VLLM"
+    else:
+        cfg.INFERENCE_BACKEND = "SGLANG"
 
     # LOG_LLM_RESPONSES forced on when LOG_LLM_PROMPTS is on
     if cfg.LOG_LLM_PROMPTS:

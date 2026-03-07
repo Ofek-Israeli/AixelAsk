@@ -411,7 +411,7 @@ config TRAIN_SAVE_ADAPTER_ONLY
 	default y
 	help
 	  Save only LoRA adapter weights in periodic checkpoints, best/,
-	  and latest. When enabled, checkpoints must be merged before SGLang
+	  and latest. When enabled, checkpoints must be merged before inference
 	  serving. When disabled, full model weights are saved.
 
 endmenu

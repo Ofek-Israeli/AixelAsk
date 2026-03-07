@@ -1,14 +1,16 @@
-# sglang[all] must be installed separately: pip install "sglang[all]" --no-deps
+# Inference backend (install ONE):
+#   SGLang: pip install "sglang[all]" --no-deps
+#   vLLM:   pip install vllm
 sentence-transformers>=4.0.0
 kconfiglib>=14.1.0
 huggingface_hub>=0.23.0
 openai>=1.52.0
 tiktoken>=0.8.0
 scikit-learn>=1.5.0
-scipy>=1.13.0,<1.15.0
-torch>=2.0.0,<2.6.0
-transformers>=4.40.0,<4.48.0
-numpy>=1.26.0,<2.0.0
+scipy>=1.13.0
+torch>=2.0.0
+transformers>=4.40.0
+numpy>=1.26.0
 pandas>=2.2.0
 tqdm>=4.66.0
 pytest>=7.0.0

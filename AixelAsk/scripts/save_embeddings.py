@@ -42,14 +42,21 @@ def load_existing_table_ids(output_path):
     return existing_ids
 
 
-def save_embeddings(index, line, col_prompt, seen_table_ids, lock):
-    """Process a single table entry, extract and save row/column embeddings; skip if table is duplicated."""
+def save_embeddings(index, line, col_prompt, seen_table_ids, lock,
+                    col_stats_list=None, col_stats_lock=None):
+    """Process a single table: generate descriptions (LLM) + compute embeddings.
+
+    With dual-GPU (LLM on GPU 0, embeddings on GPU 1) these run on
+    separate devices and can safely overlap across threads.
+
+    If col_stats_list and col_stats_lock are provided, appends
+    {"used_fallback": bool, "num_attempts": int} for col template generation.
+    """
     try:
         item = json.loads(line)
         table = item["table_text"]
         statement = item["statement"]
 
-        # Generate a unique table_id
         table_id = get_table_id_from_text(table)
 
         with lock:
@@ -57,20 +64,22 @@ def save_embeddings(index, line, col_prompt, seen_table_ids, lock):
                 return None
             seen_table_ids.add(table_id)
 
-        # Clean the table
         cleaned_table = clean_table(table)
 
-        # row_descriptions = 'test'
-        # col_descriptions = 'test'
-
-        # row_embeddings = 'testttt'
-        # col_embeddings = 'testttt'
-
-        # Get descriptions
         row_descriptions = get_row_flattened(cleaned_table)
-        col_descriptions = get_col_description(cleaned_table, col_prompt)
 
-        # Get embeddings
+        def col_stats_callback(used_fallback, num_attempts):
+            if col_stats_list is not None and col_stats_lock is not None:
+                with col_stats_lock:
+                    col_stats_list.append({
+                        "used_fallback": used_fallback,
+                        "num_attempts": num_attempts,
+                    })
+
+        col_descriptions = get_col_description(
+            cleaned_table, col_prompt, stats_callback=col_stats_callback
+        )
+
         row_embeddings = get_embeddings(row_descriptions, request_gpt_embedding)
         col_embeddings = get_embeddings(col_descriptions, request_gpt_embedding)
 
@@ -81,25 +90,55 @@ def save_embeddings(index, line, col_prompt, seen_table_ids, lock):
             "row_embeddings": row_embeddings,
             "col_descriptions": col_descriptions,
             "col_embeddings": col_embeddings,
-            "table_text": table
+            "table_text": table,
         }
-    except:
-        return {
-            "table_id": None,
-            "statement": statement,
-            "row_descriptions": None,
-            "row_embeddings": None,
-            "col_descriptions": None,
-            "col_embeddings": None,
-            "table_text": table
+    except Exception as exc:
+        print(f"save_embeddings: skipping index {index}: {exc}")
+        return None
+
+
+def _write_col_template_summary(col_stats_list, stats_output_path):
+    """Write a JSON summary of col template stats (fallback count, attempt distribution)."""
+    total = len(col_stats_list)
+    if total == 0:
+        summary = {
+            "total_tables": 0,
+            "col_template": {
+                "used_fallback_count": 0,
+                "used_fallback_fraction": 0.0,
+                "attempts_distribution": {},
+            },
         }
+    else:
+        fallback_count = sum(1 for s in col_stats_list if s["used_fallback"])
+        attempts_dist = {}
+        for s in col_stats_list:
+            n = s["num_attempts"]
+            attempts_dist[n] = attempts_dist.get(n, 0) + 1
+        summary = {
+            "total_tables": total,
+            "col_template": {
+                "used_fallback_count": fallback_count,
+                "used_fallback_fraction": round(fallback_count / total, 4),
+                "attempts_distribution": dict(sorted(attempts_dist.items())),
+            },
+        }
+    os.makedirs(os.path.dirname(stats_output_path) or ".", exist_ok=True)
+    with open(stats_output_path, 'w', encoding='utf-8') as f:
+        json.dump(summary, f, indent=2)
+    print(f"Col template stats summary written to {stats_output_path}")
 
 
-def process_table_embeddings(input_path, output_path, col_prompt_path):
-    """Two-phase embedding: generate descriptions (LLM), then embed (local model).
+def process_table_embeddings(input_path, output_path, col_prompt_path, stats_output_path=None):
+    """Parallel embedding precomputation using a thread pool.
 
-    Separating phases avoids GPU contention between the SGLang LLM and the
-    local embedding model, which causes SGLang to deadlock on Blackwell GPUs.
+    Each worker generates descriptions (LLM on GPU 0) and computes
+    vector embeddings (embedding model on GPU 1) for one table.
+    With dual-GPU isolation there is no contention.
+
+    If stats_output_path is set, writes a JSON summary of col template
+    statistics (how many tables used fallback, attempt distribution) after
+    processing.
     """
     with open(input_path, 'r', encoding='utf-8') as f:
         data = f.readlines()
@@ -110,59 +149,29 @@ def process_table_embeddings(input_path, output_path, col_prompt_path):
     seen_table_ids = load_existing_table_ids(output_path)
     print(f"Loaded {len(seen_table_ids)} existing table_ids from {output_path}.")
 
-    # ------------------------------------------------------------------
-    # Phase 1: Generate descriptions using the LLM (no embedding calls)
-    # ------------------------------------------------------------------
-    print(f"Phase 1/2: generating descriptions for {len(data)} items (LLM only) ...")
-    pending = []
-    for idx, line in enumerate(tqdm(data, desc="Phase 1: descriptions")):
-        try:
-            item = json.loads(line)
-            table = item["table_text"]
-            statement = item["statement"]
-            table_id = get_table_id_from_text(table)
+    lock = threading.Lock()
+    col_stats_list = [] if stats_output_path else None
+    col_stats_lock = threading.Lock() if stats_output_path else None
 
-            if table_id in seen_table_ids:
-                continue
-            seen_table_ids.add(table_id)
-
-            cleaned_table = clean_table(table)
-            row_descriptions = get_row_flattened(cleaned_table)
-            col_descriptions = get_col_description(cleaned_table, col_prompt)
-
-            pending.append({
-                "table_id": table_id,
-                "statement": statement,
-                "row_descriptions": row_descriptions,
-                "col_descriptions": col_descriptions,
-                "table_text": table,
-            })
-        except Exception as exc:
-            print(f"Phase 1: skipping index {idx}: {exc}")
-            continue
-
-    print(f"Phase 1 complete: {len(pending)} tables need embeddings.")
-
-    # ------------------------------------------------------------------
-    # Phase 2: Compute vector embeddings (local model only, no LLM)
-    # ------------------------------------------------------------------
-    print("Phase 2/2: computing vector embeddings (local model only) ...")
     with open(output_path, 'a', encoding='utf-8') as fout:
-        for entry in tqdm(pending, desc="Phase 2: embeddings"):
-            try:
-                row_embeddings = get_embeddings(
-                    entry["row_descriptions"], request_gpt_embedding,
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            futures = [
+                executor.submit(
+                    save_embeddings, idx, line, col_prompt, seen_table_ids, lock,
+                    col_stats_list, col_stats_lock,
                 )
-                col_embeddings = get_embeddings(
-                    entry["col_descriptions"], request_gpt_embedding,
-                )
-                entry["row_embeddings"] = row_embeddings
-                entry["col_embeddings"] = col_embeddings
-                fout.write(json.dumps(entry, ensure_ascii=False) + "\n")
-                fout.flush()
-            except Exception as exc:
-                print(f"Phase 2: skipping table {entry['table_id']}: {exc}")
-                continue
+                for idx, line in enumerate(data)
+            ]
+
+            for future in tqdm(as_completed(futures), total=len(futures),
+                               desc=f"Saving embeddings to {output_path}"):
+                result = future.result()
+                if result and result.get("table_id"):
+                    fout.write(json.dumps(result, ensure_ascii=False) + "\n")
+                    fout.flush()
+
+    if stats_output_path and col_stats_list is not None:
+        _write_col_template_summary(col_stats_list, stats_output_path)
 
     print(f"All new table embeddings appended to {output_path}")
 

@@ -51,7 +51,7 @@ def resolve_model_path(config: Config) -> str:
 
     Calls ``snapshot_download`` which is a no-op if already cached, then
     returns the absolute path to the local snapshot directory.  This path
-    is passed to SGLang ``--model-path``, ``lora_factory``, and any other
+    is passed to the inference server ``--model-path``, ``lora_factory``, and any other
     model consumer.
     """
     return snapshot_download(

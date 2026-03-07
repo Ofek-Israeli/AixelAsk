@@ -11,7 +11,7 @@ config LLM_MAX_OUTPUT_TOKENS
 	default 2048
 	help
 	  max_tokens in chat completion calls. Controls completion length,
-	  not context window (context is SGLANG_CONTEXT_LENGTH).
+	  not context window (context is SERVER_CONTEXT_LENGTH).
 
 config LLM_RETRIES
 	int "LLM call retry count"
@@ -38,8 +38,8 @@ config LLM_TOP_K
 	int "Top-k sampling"
 	default 0
 	help
-	  0 = disabled (field omitted from request). SGLang-specific;
-	  ignored by standard OpenAI API.
+	  0 = disabled (field omitted from request). Passed via extra_body
+	  for backends that support it (SGLang, vLLM).
 
 config LLM_FREQUENCY_PENALTY
 	string "Frequency penalty"
@@ -128,11 +128,11 @@ config REASONING_PARALLELISM
 	  Maximum concurrent LLM (reasoning) calls within a single DAG
 	  frontier.
 
-config SGLANG_CLIENT_CONCURRENCY
-	int "SGLang client concurrency (global)"
+config CLIENT_CONCURRENCY
+	int "LLM client concurrency (global)"
 	default 32
 	help
-	  Global cap on outstanding HTTP requests to the SGLang server
+	  Global cap on outstanding HTTP requests to the inference server
 	  across all items/threads. Implemented as a shared semaphore.
 
 config GLOBAL_EMBEDDING_CONCURRENCY

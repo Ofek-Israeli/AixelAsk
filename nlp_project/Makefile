@@ -23,10 +23,10 @@ run: $(DOTCONFIG)
 	$(PYTHON) -m src.main --config $(DOTCONFIG)
 
 server-start: $(DOTCONFIG)
-	$(PYTHON) -m src.sglang_server --config $(DOTCONFIG) --action start
+	$(PYTHON) -m src.inference_server --config $(DOTCONFIG) --action start
 
-server-stop:
-	$(PYTHON) -m src.sglang_server --action stop
+server-stop: $(DOTCONFIG)
+	$(PYTHON) -m src.inference_server --config $(DOTCONFIG) --action stop
 
 download: $(DOTCONFIG)
 	$(PYTHON) -m src.download_models --config $(DOTCONFIG)
@@ -91,4 +91,4 @@ clean-all:
 		rm -rf output/ cache/
 	rm -f $(DOTCONFIG)
 	rm -rf __pycache__ src/__pycache__ tests/__pycache__
-	rm -f .sglang.pid
+	rm -f .sglang.pid .vllm.pid

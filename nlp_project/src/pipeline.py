@@ -122,8 +122,15 @@ def run(
     # Step 1 — Compute embeddings
     # ==================================================================
     logger.info("Step 1: computing table embeddings …")
-    _compute_embeddings(test_examples, config.EMBEDDING_CACHE, config.COL_PROMPT,
-                        save_embeddings)
+    stats_output_path = os.path.join(
+        os.path.dirname(config.EMBEDDING_CACHE), "embedding_run_summary.json"
+    )
+    _compute_embeddings(
+        test_examples, config.EMBEDDING_CACHE, config.COL_PROMPT,
+        save_embeddings, stats_output_path=stats_output_path,
+    )
+    if stats_output_path:
+        logger.info("Embedding run summary: %s", stats_output_path)
 
     # ==================================================================
     # Step 1a — Load embedding cache
@@ -443,9 +450,11 @@ def _compute_embeddings(
     cache_path: str,
     col_prompt_path: str,
     save_embeddings_mod,
+    stats_output_path: str | None = None,
 ) -> None:
     """Write *examples* to a temp JSONL file and delegate to the upstream
-    ``process_table_embeddings(input_path, output_path, col_prompt_path)``.
+    ``process_table_embeddings(input_path, output_path, col_prompt_path, ...)``.
+    If stats_output_path is set, a summary of col template stats is written there.
     """
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".jsonl", delete=False, encoding="utf-8",
@@ -456,6 +465,7 @@ def _compute_embeddings(
     try:
         save_embeddings_mod.process_table_embeddings(
             tmp_path, cache_path, col_prompt_path,
+            stats_output_path=stats_output_path,
         )
     finally:
         os.unlink(tmp_path)

@@ -172,7 +172,7 @@ class TestDefconfigs:
         with mock.patch("src.config._validate"):
             cfg = load_config(DEFCONFIG_TRAIN_GRPO)
 
-        assert cfg.SGLANG_PORT == 30000
+        assert cfg.SERVER_PORT == 30000
 
     def test_defconfig_train_overfit_poc_valid(self):
         from src.config import load_config
@@ -180,7 +180,7 @@ class TestDefconfigs:
         with mock.patch("src.config._validate"):
             cfg = load_config(DEFCONFIG_TRAIN_OVERFIT_POC)
 
-        assert cfg.SGLANG_PORT == 30000
+        assert cfg.SERVER_PORT == 30000
 
 
 # ---------------------------------------------------------------------------
@@ -200,7 +200,7 @@ class TestTrainConfigFromConfig:
             cfg = load_config(path)
 
         tc = TrainConfig.from_config(cfg)
-        assert tc.SGLANG_PORT == cfg.SGLANG_PORT
+        assert tc.SERVER_PORT == cfg.SERVER_PORT
         assert tc.GRPO_TEMPERATURE == cfg.GRPO_TEMPERATURE
 
     def test_test_trained_checkpoint_source(self, tmp_path):

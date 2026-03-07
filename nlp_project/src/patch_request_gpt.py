@@ -3,7 +3,7 @@
 Replaces ``utils.request_gpt.request_gpt_chat``,
 ``utils.request_gpt.request_gpt_chat_1``, and
 ``utils.request_gpt.request_gpt_embedding`` with project-local
-implementations backed by ``SglangClient`` and ``EmbeddingClient``.
+implementations backed by ``LlmClient`` and ``EmbeddingClient``.
 
 When a ``CallRecorder`` is provided, a recording wrapper is installed that
 captures metadata for every LLM call.
@@ -27,13 +27,13 @@ if TYPE_CHECKING:
     from src.call_recorder import CallRecorder
     from src.config import Config
     from src.embedding_client import EmbeddingClient
-    from src.sglang_client import SglangClient
+    from src.llm_client import LlmClient
 
 logger = logging.getLogger(__name__)
 
 
 def init_patches(
-    sglang_client: SglangClient,
+    llm_client: LlmClient,
     embedding_client: EmbeddingClient,
     config: Config,
     call_recorder: Optional[CallRecorder] = None,
@@ -48,11 +48,11 @@ def init_patches(
     rg.request_gpt_embedding = embedding_client.embed_one
 
     if call_recorder is None:
-        rg.request_gpt_chat = sglang_client.chat
-        rg.request_gpt_chat_1 = sglang_client.chat
+        rg.request_gpt_chat = llm_client.chat
+        rg.request_gpt_chat_1 = llm_client.chat
     else:
         def recording_chat(prompt: str) -> str:
-            result = sglang_client.chat_with_metadata(prompt)
+            result = llm_client.chat_with_metadata(prompt)
 
             captured_prompt = prompt if config.LOG_LLM_PROMPTS else None
             captured_response = result.text if config.LOG_LLM_RESPONSES else None

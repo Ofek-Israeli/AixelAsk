@@ -2,7 +2,7 @@
 
 This module implements a fully local, GPU-accelerated pipeline for table
 question-answering using DAG-structured reasoning plans. It runs Mistral-7B via
-SGLang for inference, uses nomic-embed-text-v1 for retrieval embeddings, and
+SGLang or vLLM for inference, uses nomic-embed-text-v1 for retrieval embeddings, and
 supports GRPO (Group Relative Policy Optimization) RL fine-tuning via QLoRA.
 All configuration is managed through Linux kernel-style Kconfig with
 `make menuconfig`, and all artifacts persist on Runpod Volume disk by default.
@@ -15,7 +15,7 @@ All configuration is managed through Linux kernel-style Kconfig with
 nlp_project/
 ├── Kconfig                              # Root Kconfig (includes sub-menus)
 ├── Kconfig.model                        # Inference & embedding model config
-├── Kconfig.server                       # SGLang server config
+├── Kconfig.server                       # Inference backend config (SGLang / vLLM)
 ├── Kconfig.dataset                      # Dataset selection & paths
 ├── Kconfig.split                        # Split mode, per-dataset explicit index lists
 ├── Kconfig.retrieval                    # Retrieval / DAG parameters
@@ -52,8 +52,10 @@ nlp_project/
 ├── src/
 │   ├── main.py                          # Inference entrypoint
 │   ├── config.py                        # .config parser
+│   ├── inference_server.py              # Backend dispatch (SGLang / vLLM)
 │   ├── sglang_server.py                 # SGLang server lifecycle
-│   ├── sglang_client.py                 # OpenAI-compatible LLM client
+│   ├── vllm_server.py                   # vLLM server lifecycle
+│   ├── llm_client.py                    # OpenAI-compatible LLM client
 │   ├── embedding_client.py              # Local nomic-embed-text-v1
 │   ├── pipeline.py                      # Orchestrates embeddings → reasoning
 │   ├── dag_executor.py                  # Frontier-parallel DAG executor
@@ -100,7 +102,8 @@ nlp_project/
     ├── test_dag_stats.py
     ├── test_call_recorder.py
     ├── test_embedding_client.py
-    └── test_sglang_client.py
+    ├── test_llm_client.py
+    └── test_vllm_server.py
 ```
 
 All prompt files are vendored under `nlp_project/prompt/`. The module has no
@@ -117,7 +120,7 @@ pip install -r requirements.txt
 pip check   # verify no dependency conflicts
 ```
 
-Key dependencies: `sglang[all]`, `sentence-transformers`, `trl`, `peft`,
+Key dependencies: `sglang[all]` or `vllm`, `sentence-transformers`, `trl`, `peft`,
 `bitsandbytes`, `kconfiglib`, `accelerate`, `datasets`, `rich`.
 
 ---
@@ -143,12 +146,12 @@ Configuration is split across sub-menus sourced from the root `Kconfig`:
 | File | Menu | Key symbols |
 |------|------|-------------|
 | `Kconfig.model` | Model Configuration | `CONFIG_INFERENCE_MODEL`, `CONFIG_EMBEDDING_MODEL`, `CONFIG_MODEL_CACHE_DIR` |
-| `Kconfig.server` | SGLang Server | `CONFIG_SGLANG_PORT`, `CONFIG_SGLANG_TP_SIZE`, `CONFIG_SGLANG_MEM_FRACTION` |
+| `Kconfig.server` | Inference Backend | `CONFIG_BACKEND_SGLANG`/`CONFIG_BACKEND_VLLM`, `CONFIG_SERVER_PORT`, `CONFIG_SERVER_TP_SIZE` |
 | `Kconfig.dataset` | Dataset | `CONFIG_DATASET_WIKITQ_4K`, `CONFIG_INFERENCE_DATASET_PATH` |
 | `Kconfig.split` | Split Configuration | `CONFIG_SPLIT_MODE_*`, per-dataset index lists |
 | `Kconfig.retrieval` | Retrieval / DAG | `CONFIG_USE_DAG`, `CONFIG_DAG_PROMPT_*`, `CONFIG_FEWSHOT_*` |
 | `Kconfig.output` | Output / Logging | `CONFIG_PERSISTENT_ROOT`, `CONFIG_RESULT_FILE`, `CONFIG_LOG_FILE` |
-| `Kconfig.runtime` | Runtime | `CONFIG_MAX_WORKERS`, `CONFIG_SGLANG_CLIENT_CONCURRENCY` |
+| `Kconfig.runtime` | Runtime | `CONFIG_MAX_WORKERS`, `CONFIG_CLIENT_CONCURRENCY` |
 | `Kconfig.dagstats` | DAG Statistics | `CONFIG_DAG_STATS_ENABLE`, `CONFIG_DAG_STATS_FILE` |
 | `Kconfig.training` | Training | `CONFIG_ENABLE_TRAINING`, `CONFIG_TRAINING_MODE_*`, `CONFIG_GRPO_*`, `CONFIG_REWARD_*`, `CONFIG_TRAIN_LORA_*` |
 | `Kconfig.training_stats` | Training Stats & Curves | `CONFIG_TRAIN_STATS_ENABLE`, `CONFIG_TRAIN_CURVES_*` |
@@ -171,7 +174,7 @@ make defconfig
 make run
 ```
 
-This starts an SGLang server with Mistral-7B, computes embeddings with
+This starts the inference server (SGLang by default) with Mistral-7B, computes embeddings with
 nomic-embed-text-v1, runs DAG-based reasoning on the test split, and writes
 results to `output/results.jsonl`.
 
@@ -281,7 +284,7 @@ CONFIG_OVERFIT_POC_FIRST_N=y
 ## Training Workflows
 
 Training uses TRL's `GRPOTrainer` with QLoRA (4-bit NF4 base + LoRA adapters).
-The SGLang server runs during training for reward-time DAG execution.
+The inference server (SGLang or vLLM) runs during training for reward-time DAG execution.
 
 ### Overfit PoC (validate the training stack)
 
@@ -421,8 +424,8 @@ resolved paths for the current `.config`.
 | `make run-baseline` | Run the min-depth DAG prompt baseline (separate output files) |
 | `make run-baseline-fewshot-ph-ext` | Run the parallel+hybrid extended few-shot baseline |
 | `make download` | Pre-download HF models (no server started) |
-| `make server-start` | Start the SGLang server manually |
-| `make server-stop` | Stop the SGLang server |
+| `make server-start` | Start the inference server manually |
+| `make server-stop` | Stop the inference server |
 | `make test` | Run the pytest test suite |
 | `make clean` | Remove `.config` and `__pycache__` directories |
 | `make clean-all` | Remove `.config`, project-local outputs and caches (preserves HF model cache) |
@@ -482,7 +485,7 @@ uses `/tmp` (Container disk).
 | **Heavy** | 60 GB | 200 GB | Multiple training runs, many checkpoints |
 
 Main drivers of Volume disk usage: HF model cache (~14 GB for full-precision
-Mistral-7B for SGLang), checkpoint accumulation (~200 MB per LoRA adapter,
+Mistral-7B for inference), checkpoint accumulation (~200 MB per LoRA adapter,
 ~14 GB per merged export).
 
 ### Verification
@@ -503,25 +506,27 @@ ls -d /workspace/.cache/huggingface/hub
 
 ## Common Troubleshooting
 
-### SGLang server won't start
+### Inference server won't start
 
-SGLang is required for both inference and training (reward-time DAG execution).
+An inference server (SGLang or vLLM) is required for both inference and training
+(reward-time DAG execution). Switch backend via `make menuconfig` → Inference
+Backend Configuration.
 
 ```
-ERROR: SGLang server failed to start within CONFIG_SGLANG_HEALTH_TIMEOUT seconds
+ERROR: server failed to start within CONFIG_SERVER_HEALTH_TIMEOUT seconds
 ```
 
 - Check GPU availability: `nvidia-smi`
 - Check port conflicts: `lsof -i :30000` (default port)
-- Increase timeout: set `CONFIG_SGLANG_HEALTH_TIMEOUT` higher (default: 300s)
+- Increase timeout: set `CONFIG_SERVER_HEALTH_TIMEOUT` higher (default: 300s)
 - Check server logs in `output/run.log`
 - Ensure the model is downloaded: `make download`
 - Try restarting: `make server-stop && make run`
 
 ### Out of memory (OOM)
 
-- **Inference OOM:** Reduce `CONFIG_SGLANG_MEM_FRACTION` (default: 0.85).
-  Reduce `CONFIG_MAX_WORKERS` or `CONFIG_SGLANG_CLIENT_CONCURRENCY`.
+- **Inference OOM:** Reduce `CONFIG_SGLANG_MEM_FRACTION` / `CONFIG_VLLM_GPU_MEMORY_UTILIZATION` (default: 0.85).
+  Reduce `CONFIG_MAX_WORKERS` or `CONFIG_CLIENT_CONCURRENCY`.
 - **Training OOM:** Ensure `CONFIG_TRAIN_USE_4BIT=y` and
   `CONFIG_TRAIN_USE_GRADIENT_CHECKPOINTING=y`. Reduce `CONFIG_GRPO_GROUP_SIZE`
   or `CONFIG_GRPO_BATCH_SIZE_PROMPTS`. Reduce `CONFIG_GRPO_MAX_NEW_TOKENS`.
@@ -571,18 +576,18 @@ CONFIG_MODEL_CACHE_DIR="/workspace/.cache/huggingface"
 If another process is using port 30000:
 
 ```bash
-make server-stop          # stop any existing SGLang instance
+make server-stop          # stop any existing inference server instance
 lsof -i :30000            # check what's using the port
 ```
 
-Or change the port in `make menuconfig` → SGLang Server → Port.
+Or change the port in `make menuconfig` → Inference Backend Configuration → Server port.
 
 ---
 
 ## Key Design Decisions
 
 1. **Monkey-patching over forking** — Upstream AixelAsk code runs unmodified; patches intercept `request_gpt`, `get_dag`, and DAG execution at import time.
-2. **SGLang over Flask** — OpenAI-compatible endpoint with continuous batching and PagedAttention for better throughput.
+2. **SGLang/vLLM over Flask** — OpenAI-compatible endpoint with continuous batching and PagedAttention for better throughput. Backend is configurable via Kconfig.
 3. **Kconfig over YAML/TOML** — `make menuconfig` TUI with typed defaults, dependencies, and help text.
 4. **Frontier-based parallel DAG execution** — Topological-level scheduling replaces the upstream flat sequential loop, realizing parallel/hybrid execution from the paper.
 5. **TRL GRPOTrainer over manual RL** — GRPO is delegated to TRL; the project provides only the reward function and dataset.

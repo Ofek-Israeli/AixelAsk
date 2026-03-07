@@ -5,7 +5,7 @@ quantization, prepares it for LoRA training via PEFT, and applies
 gradient checkpointing if configured.
 
 ``merge_and_export`` loads an adapter-only checkpoint, merges it into
-the base model, and saves the full-weight model for SGLang serving.
+the base model, and saves the full-weight model for inference server serving.
 """
 
 from __future__ import annotations

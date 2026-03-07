@@ -18,21 +18,23 @@ Note：
 3. Only output the DAG. Do not include any explanation, reasoning process, or extra text. Only output a single valid JSON array.
 
 ### Output Format (strictly follow):
+{% raw %}
 [
-    {{"NodeID": nodeid, "Sub-Level-Question": "Sub-Level-Question", "Action": "retrieval" or "reasoning", "Top k": "Number or 'all',"Next": nodeid}},
+    {"NodeID": nodeid, "Sub-Level-Question": "Sub-Level-Question", "Action": "retrieval" or "reasoning", "Top k": "Number or 'all'","Next": nodeid},
     ...
 ]
+{% endraw %}
 
 ### Example
 
-{fewshot}
+{{ fewshot }}
 
 ### Now, generate a structured DAG for the following question:
 
 Question:
-{question}
+{{ question }}
 
 Sampled Table:
-{table}
+{{ table }}
 
 Output:

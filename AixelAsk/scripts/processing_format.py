@@ -28,6 +28,7 @@ def get_row_template(table, prompt):
 
 
 def get_col_template(table, prompt):
+    """Generate column template; returns (template_str, used_fallback, num_attempts)."""
     prompt_template = prompt
     header = table[0]
     max_attempts = 10
@@ -44,12 +45,12 @@ def get_col_template(table, prompt):
 
         cleaned = _extract_col_lines(col_template)
         if validate_col_template(cleaned, header):
-            return cleaned
+            return (cleaned, False, attempt + 1)
         print(f"Attempt {attempt + 1}/{max_attempts}: col template invalid "
               f"(got {len(col_template.strip().splitlines())} lines, need {len(header)}), retrying...")
 
     print(f"All {max_attempts} attempts failed; falling back to header-only descriptions.")
-    return _fallback_col_template(header)
+    return (_fallback_col_template(header), True, max_attempts)
 
 
 def _extract_col_lines(raw: str) -> str:
@@ -107,11 +108,16 @@ def get_row_description(table, row_prompt):
     return descriptions
 
 
-def get_col_description(table, col_prompt):
+def get_col_description(table, col_prompt, stats_callback=None):
     """
     Generate a natural language description for each column in the table.
+
+    If stats_callback is provided, it is called with (used_fallback, num_attempts)
+    after generating the col template (used_fallback True when fallback was used).
     """
-    col_template = get_col_template(table, col_prompt)
+    col_template, used_fallback, num_attempts = get_col_template(table, col_prompt)
+    if stats_callback is not None:
+        stats_callback(used_fallback=used_fallback, num_attempts=num_attempts)
     column_descriptions = col_template.split('\n')
     # print("True column_descriptions:", column_descriptions)
 
