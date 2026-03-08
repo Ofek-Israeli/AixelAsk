@@ -1,0 +1,217 @@
+Example1：
+
+Question:
+```
+What are the job titles of Alice, Bob, Carlos, and Diana?
+```
+
+Sampled Table:
+```
+| Employee | Department  | Job Title         | Hire Year |
+| Alice    | Engineering | Software Engineer | 2018      |
+| Bob      | Marketing   | Brand Strategist  | 2016      |
+| Carlos   | Finance     | Risk Analyst      | 2020      |
+| Diana    | Engineering | DevOps Lead       | 2019      |
+| Ethan    | Marketing   | Content Writer    | 2021      |
+```
+
+Output:
+
+[
+  {"NodeID": 1, "Sub-Level-Question": "What is the job title of Alice?", "Action": "Retrieval", "Top k": "1", "Next": [5]},
+  {"NodeID": 2, "Sub-Level-Question": "What is the job title of Bob?", "Action": "Retrieval", "Top k": "1", "Next": [5]},
+  {"NodeID": 3, "Sub-Level-Question": "What is the job title of Carlos?", "Action": "Retrieval", "Top k": "1", "Next": [5]},
+  {"NodeID": 4, "Sub-Level-Question": "What is the job title of Diana?", "Action": "Retrieval", "Top k": "1", "Next": [5]},
+  {"NodeID": 5, "Sub-Level-Question": "List the job titles of Alice, Bob, Carlos, and Diana.", "Action": "Reasoning", "Top k": "4", "Next": []}
+]
+
+
+Example2：
+
+Question:
+```
+What is the average price of Electronics products versus Clothing products?
+```
+
+Sampled Table:
+```
+| Product     | Category    | Price ($) | Stock |
+| Headphones  | Electronics | 85        | 200   |
+| Jacket      | Clothing    | 120       | 150   |
+| Tablet      | Electronics | 340       | 90    |
+| Sneakers    | Clothing    | 95        | 300   |
+| Smartwatch  | Electronics | 210       | 175   |
+```
+
+Output:
+
+[
+  {"NodeID": 1, "Sub-Level-Question": "What is the average price of products in the Electronics category?", "Action": "Retrieval", "Top k": "all", "Next": [3]},
+  {"NodeID": 2, "Sub-Level-Question": "What is the average price of products in the Clothing category?", "Action": "Retrieval", "Top k": "all", "Next": [3]},
+  {"NodeID": 3, "Sub-Level-Question": "Compare the average price of Electronics products and Clothing products.", "Action": "Reasoning", "Top k": "2", "Next": []}
+]
+
+
+Example3：
+
+Question:
+```
+How many concerts were held in Berlin, Tokyo, and São Paulo, and which city hosted the most?
+```
+
+Sampled Table:
+```
+| Concert ID | Artist        | City       | Date       | Attendance |
+| 101        | The Waves     | Berlin     | 2023-03-15 | 12000      |
+| 102        | Nova Rhythm   | Tokyo      | 2023-04-22 | 45000      |
+| 103        | Dusk Quartet  | Berlin     | 2023-06-10 | 8000       |
+| 104        | Solaris       | São Paulo  | 2023-07-01 | 30000      |
+| 105        | The Waves     | Tokyo      | 2023-08-19 | 15000      |
+```
+
+Output:
+
+[
+  {"NodeID": 1, "Sub-Level-Question": "How many concerts were held in Berlin?", "Action": "Retrieval", "Top k": "all", "Next": [4]},
+  {"NodeID": 2, "Sub-Level-Question": "How many concerts were held in Tokyo?", "Action": "Retrieval", "Top k": "all", "Next": [4]},
+  {"NodeID": 3, "Sub-Level-Question": "How many concerts were held in São Paulo?", "Action": "Retrieval", "Top k": "all", "Next": [4]},
+  {"NodeID": 4, "Sub-Level-Question": "Which city hosted the most concerts among Berlin, Tokyo, and São Paulo?", "Action": "Reasoning", "Top k": "3", "Next": []}
+]
+
+
+Example4：
+
+Question:
+```
+What are the populations of Springfield, Riverside, and Lakewood, and which city is the most populated?
+```
+
+Sampled Table:
+```
+| City        | State      | Population | Area (sq mi) |
+| Springfield | Illinois   | 114000     | 67           |
+| Riverside   | California | 328000     | 81           |
+| Lakewood    | Colorado   | 156000     | 44           |
+| Fairview    | Texas      | 89000      | 52           |
+| Oakdale     | Minnesota  | 28000      | 11           |
+```
+
+Output:
+
+[
+  {"NodeID": 1, "Sub-Level-Question": "What is the population of Springfield?", "Action": "Retrieval", "Top k": "1", "Next": [4]},
+  {"NodeID": 2, "Sub-Level-Question": "What is the population of Riverside?", "Action": "Retrieval", "Top k": "1", "Next": [4]},
+  {"NodeID": 3, "Sub-Level-Question": "What is the population of Lakewood?", "Action": "Retrieval", "Top k": "1", "Next": [4]},
+  {"NodeID": 4, "Sub-Level-Question": "Which city has the highest population among Springfield, Riverside, and Lakewood?", "Action": "Reasoning", "Top k": "3", "Next": []}
+]
+
+
+Example5：
+
+Question:
+```
+What is the total number of goals scored by the forwards and by the midfielders?
+```
+
+Sampled Table:
+```
+| Player      | Position   | Goals | Assists | Matches |
+| Nakamura    | Forward    | 18    | 7       | 30      |
+| De Rossi    | Midfielder | 9     | 12      | 28      |
+| Okafor      | Forward    | 14    | 5       | 32      |
+| Lindqvist   | Midfielder | 6     | 15      | 31      |
+| Chandra     | Defender   | 2     | 3       | 29      |
+```
+
+Output:
+
+[
+  {"NodeID": 1, "Sub-Level-Question": "What is the total number of goals scored by forwards?", "Action": "Retrieval", "Top k": "all", "Next": [3]},
+  {"NodeID": 2, "Sub-Level-Question": "What is the total number of goals scored by midfielders?", "Action": "Retrieval", "Top k": "all", "Next": [3]},
+  {"NodeID": 3, "Sub-Level-Question": "Combine the total goals for forwards and midfielders.", "Action": "Reasoning", "Top k": "2", "Next": []}
+]
+
+
+Example6：
+
+Question:
+```
+Which material has the lowest melting point among Aluminium, Copper, and Titanium?
+```
+
+Sampled Table:
+```
+| Material   | Melting Point (°C) | Density (g/cm³) | Conductivity (S/m) |
+| Aluminium  | 660                | 2.70            | 3.77e7              |
+| Copper     | 1085               | 8.96            | 5.96e7              |
+| Titanium   | 1668               | 4.51            | 2.38e6              |
+| Iron       | 1538               | 7.87            | 1.00e7              |
+| Zinc       | 420                | 7.13            | 1.69e7              |
+```
+
+Output:
+
+[
+  {"NodeID": 1, "Sub-Level-Question": "What is the melting point of Aluminium?", "Action": "Retrieval", "Top k": "1", "Next": [4]},
+  {"NodeID": 2, "Sub-Level-Question": "What is the melting point of Copper?", "Action": "Retrieval", "Top k": "1", "Next": [4]},
+  {"NodeID": 3, "Sub-Level-Question": "What is the melting point of Titanium?", "Action": "Retrieval", "Top k": "1", "Next": [4]},
+  {"NodeID": 4, "Sub-Level-Question": "Which material has the lowest melting point among Aluminium, Copper, and Titanium?", "Action": "Reasoning", "Top k": "3", "Next": []}
+]
+
+
+Example7：
+
+Question:
+```
+Compare the average revenue of tech companies and finance companies, and determine which sector performed better.
+```
+
+Sampled Table:
+```
+| Company      | Sector   | Revenue ($M) | Employees |
+| ByteWave     | Tech     | 4200         | 3500      |
+| CapitalEdge  | Finance  | 3100         | 2800      |
+| NeuralPath   | Tech     | 5800         | 4100      |
+| TrustVault   | Finance  | 4600         | 3200      |
+| GridMotion   | Energy   | 2900         | 5000      |
+| CloudNine    | Tech     | 3400         | 2200      |
+```
+
+Output:
+
+[
+  {"NodeID": 1, "Sub-Level-Question": "What are the revenues of companies in the Tech sector?", "Action": "Retrieval", "Top k": "all", "Next": [3]},
+  {"NodeID": 2, "Sub-Level-Question": "What are the revenues of companies in the Finance sector?", "Action": "Retrieval", "Top k": "all", "Next": [4]},
+  {"NodeID": 3, "Sub-Level-Question": "What is the average revenue of the Tech sector companies?", "Action": "Reasoning", "Top k": "1", "Next": [5]},
+  {"NodeID": 4, "Sub-Level-Question": "What is the average revenue of the Finance sector companies?", "Action": "Reasoning", "Top k": "1", "Next": [5]},
+  {"NodeID": 5, "Sub-Level-Question": "Which sector has a higher average revenue, Tech or Finance?", "Action": "Reasoning", "Top k": "2", "Next": []}
+]
+
+
+Example8：
+
+Question:
+```
+Find the fastest runner from Team Alpha and the fastest runner from Team Beta, then determine who is faster overall.
+```
+
+Sampled Table:
+```
+| Runner     | Team       | Event   | Best Time (s) |
+| Kowalski   | Team Alpha | 100 m   | 10.45          |
+| Mensah     | Team Beta  | 100 m   | 10.31          |
+| Petrov     | Team Alpha | 100 m   | 10.62          |
+| Tanaka     | Team Beta  | 100 m   | 10.58          |
+| Johansson  | Team Alpha | 100 m   | 10.38          |
+| Diallo     | Team Beta  | 100 m   | 10.44          |
+```
+
+Output:
+
+[
+  {"NodeID": 1, "Sub-Level-Question": "What are the best times of runners from Team Alpha?", "Action": "Retrieval", "Top k": "all", "Next": [3]},
+  {"NodeID": 2, "Sub-Level-Question": "What are the best times of runners from Team Beta?", "Action": "Retrieval", "Top k": "all", "Next": [4]},
+  {"NodeID": 3, "Sub-Level-Question": "Which runner from Team Alpha has the fastest time?", "Action": "Reasoning", "Top k": "1", "Next": [5]},
+  {"NodeID": 4, "Sub-Level-Question": "Which runner from Team Beta has the fastest time?", "Action": "Reasoning", "Top k": "1", "Next": [5]},
+  {"NodeID": 5, "Sub-Level-Question": "Who is faster overall, the fastest runner from Team Alpha or Team Beta?", "Action": "Reasoning", "Top k": "2", "Next": []}
+]
