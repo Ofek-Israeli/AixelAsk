@@ -591,7 +591,7 @@ Or change the port in `make menuconfig` → Inference Backend Configuration → 
 3. **Kconfig over YAML/TOML** — `make menuconfig` TUI with typed defaults, dependencies, and help text.
 4. **Frontier-based parallel DAG execution** — Topological-level scheduling replaces the upstream flat sequential loop, realizing parallel/hybrid execution from the paper.
 5. **TRL GRPOTrainer over manual RL** — GRPO is delegated to TRL; the project provides only the reward function and dataset.
-6. **Single weighted scalar reward** — `r = w_correct * r_correct + w_valid * r_valid - w_depth * depth - w_invalid * 1[invalid]`. Trade-offs tuned via four Kconfig weights.
+6. **Single weighted scalar reward** — `r = w_correct * r_correct + w_valid * r_valid - w_depth * depth`. Trade-offs tuned via three Kconfig weights.
 7. **QLoRA for local hardware** — 4-bit NF4 base + LoRA adapters reduces VRAM to ~8–12 GB, fitting a single consumer GPU.
 8. **TeX/PGFPlots learning curves** — Publication-quality vector PDFs without matplotlib. TSV data + Jinja2 TeX templates compiled incrementally.
 9. **Overfit-PoC before full training** — Validates the entire training stack on 16 examples before committing to large-scale runs.

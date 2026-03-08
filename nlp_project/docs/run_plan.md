@@ -206,7 +206,7 @@ clean-all:
 
 **`defconfig.fewshot_parallel_hybrid_ext`:** A shipped reference `.config` showing the parallel+hybrid extended few-shot baseline settings (`CONFIG_FEWSHOT_VARIANT=FEWSHOT_PARALLEL_HYBRID_EXTENDED`, separate output paths). Same overlay design as `defconfig.min_depth` — `make run-baseline-fewshot-ph-ext` uses `--override` flags, not a full config copy.
 
-**`defconfig.train_grpo`:** A shipped `.config` for GRPO training. Sets `CONFIG_ENABLE_TRAINING=y`, `CONFIG_TRAINING_MODE=TRAINING_MODE_GRPO`, `CONFIG_GLOBAL_SEED=42`, LoRA rank 16, 4-bit quantization enabled, gradient checkpointing enabled, reward weights `w_correct=1.0, w_valid=0.5, w_depth=0.1, w_invalid=0.5`, and `CONFIG_TRAIN_OUTPUT_DIR="output/train_grpo"`. Output layout: `output/train_grpo/train_steps.jsonl` (per-step stats), `output/train_grpo/train_evals.jsonl` (per-eval stats), `output/train_grpo/train_stats_summary.json` (end-of-run summary), `output/train_grpo/curves/` (TeX learning curves), `output/train_grpo/checkpoints/` (model checkpoints), `output/train_grpo/resolved_seeds.json`, `output/train_grpo/reward_config.json`. Uses `CONFIG_SPLIT_MODE=SPLIT_MODE_SEEDED_RATIO` (default) with `CONFIG_TRAIN_DATASET_PATH` pointing to the default WikiTQ-4k training set. TeX curve compilation is enabled with `CONFIG_TRAIN_CURVES_COMPILE_EVERY_STEPS=100`. After training completes, evaluate the trained model with `make test-trained-best` (recommended) — results are written to `output/train_grpo/test_best/`.
+**`defconfig.train_grpo`:** A shipped `.config` for GRPO training. Sets `CONFIG_ENABLE_TRAINING=y`, `CONFIG_TRAINING_MODE=TRAINING_MODE_GRPO`, `CONFIG_GLOBAL_SEED=42`, LoRA rank 16, 4-bit quantization enabled, gradient checkpointing enabled, reward weights `w_correct=1.0, w_valid=0.5, w_depth=0.1`, and `CONFIG_TRAIN_OUTPUT_DIR="output/train_grpo"`. Output layout: `output/train_grpo/train_steps.jsonl` (per-step stats), `output/train_grpo/train_evals.jsonl` (per-eval stats), `output/train_grpo/train_stats_summary.json` (end-of-run summary), `output/train_grpo/curves/` (TeX learning curves), `output/train_grpo/checkpoints/` (model checkpoints), `output/train_grpo/resolved_seeds.json`, `output/train_grpo/reward_config.json`. Uses `CONFIG_SPLIT_MODE=SPLIT_MODE_SEEDED_RATIO` (default) with `CONFIG_TRAIN_DATASET_PATH` pointing to the default WikiTQ-4k training set. TeX curve compilation is enabled with `CONFIG_TRAIN_CURVES_COMPILE_EVERY_STEPS=100`. After training completes, evaluate the trained model with `make test-trained-best` (recommended) — results are written to `output/train_grpo/test_best/`.
 
 **`defconfig.train_overfit_poc`:** Identical to `defconfig.train_grpo` except: `CONFIG_TRAINING_MODE=TRAINING_MODE_OVERFIT_POC`, `CONFIG_OVERFIT_POC_NUM_EXAMPLES=16`, `CONFIG_OVERFIT_POC_SELECTION_MODE=FIRST_N`, `CONFIG_GRPO_GROUP_SIZE=4` (smaller group for speed), `CONFIG_GRPO_EVAL_EVERY_STEPS=5`, `CONFIG_GRPO_SAVE_EVERY_STEPS=10`, `CONFIG_TRAIN_CURVES_UPDATE_EVERY_STEPS=5`, `CONFIG_TRAIN_CURVES_COMPILE_EVERY_STEPS=25`, `CONFIG_TRAIN_OUTPUT_DIR="output/train_overfit_poc"`. Designed for rapid iteration to validate the training stack end-to-end before large-scale runs.
 
@@ -682,10 +682,8 @@ All GRPO symbols below are mapped to corresponding `GRPOConfig` fields by `train
 | `CONFIG_REWARD_WEIGHT_CORRECTNESS` | string | `"1.0"` | Weight for answer correctness. Parsed as float |
 | `CONFIG_REWARD_WEIGHT_VALIDITY` | string | `"0.5"` | Weight for DAG validity (1 if valid, 0 if invalid). Parsed as float |
 | `CONFIG_REWARD_WEIGHT_DEPTH` | string | `"0.1"` | Weight for depth penalty term. Parsed as float |
-| `CONFIG_REWARD_WEIGHT_INVALID_PENALTY` | string | `"0.5"` | Flat penalty for producing an invalid DAG. Parsed as float |
 | `CONFIG_REWARD_DEPTH_NORMALIZATION` | choice | `DIVIDE_BY_MAX_DEPTH` | How depth is normalized before applying the weight |
 | `CONFIG_REWARD_MAX_DEPTH` | int | `10` | Maximum depth for normalization (used by `DIVIDE_BY_MAX_DEPTH` and `CLAMPED_LINEAR`) |
-| `CONFIG_REWARD_INVALID_IF_PARSE_FAILS` | bool | `y` | If the LLM output cannot be parsed as JSON at all, treat as invalid DAG |
 | `CONFIG_REWARD_CORRECTNESS_PARTIAL_CREDIT` | bool | `n` | If `y`, use fuzzy string matching for partial correctness credit (0.0–1.0 instead of binary 0/1). If `n`, exact match only |
 
 **`CONFIG_REWARD_DEPTH_NORMALIZATION` choices:**
@@ -696,7 +694,7 @@ All GRPO symbols below are mapped to corresponding `GRPOConfig` fields by `train
 | `DIVIDE_BY_MAX_DEPTH` (default) | `depth_term = depth / CONFIG_REWARD_MAX_DEPTH`, clamped to [0, 1] |
 | `CLAMPED_LINEAR` | `depth_term = min(depth / CONFIG_REWARD_MAX_DEPTH, 1.0)` (identical to DIVIDE_BY_MAX_DEPTH with clamp; kept as a named choice for clarity) |
 
-**Reward formula:** `r = w_correct * r_correct + w_valid * r_valid - w_depth * depth_term - w_invalid * 1[invalid]`. See §12 for exact definitions of each component.
+**Reward formula:** `r = w_correct * r_correct + w_valid * r_valid - w_depth * depth_term`. See §12 for exact definitions of each component.
 
 **LoRA / QLoRA:**
 
@@ -2486,9 +2484,9 @@ Tests the thread-safe LLM call accumulator (no GPU required).
 
 Tests weighted reward computation (no GPU required).
 
-- **Basic weighted reward:** Provide `r_correct=1, r_valid=1, depth=3` with default weights → assert reward matches formula `1.0*1 + 0.5*1 - 0.1*(3/10) - 0.5*0 = 1.47`.
-- **Invalid DAG penalty:** Provide `r_valid=0` (invalid) → assert `1[invalid]=1` and reward includes `-w_invalid`.
-- **Parse failure:** Provide unparseable output with `CONFIG_REWARD_INVALID_IF_PARSE_FAILS=y` → assert `r_correct=0, r_valid=0, 1[invalid]=1`, reward = `-w_invalid`.
+- **Basic weighted reward:** Provide `r_correct=1, r_valid=1, depth=3` with default weights → assert reward matches formula `1.0*1 + 0.5*1 - 0.1*(3/10) = 1.47`.
+- **Invalid DAG:** Provide `r_valid=0` (invalid), `depth=0` → reward = `0.0`.
+- **Parse failure:** Provide unparseable output → assert `r_correct=0, r_valid=0, depth=0`, reward = `0.0`.
 - **Depth normalization NONE:** Depth=5 → `depth_term=5` (raw).
 - **Depth normalization DIVIDE_BY_MAX_DEPTH:** Depth=5, max=10 → `depth_term=0.5`. Depth=15, max=10 → `depth_term=1.0` (clamped).
 - **Partial credit disabled:** Predicted="42", gold="42" → `r_correct=1`. Predicted="43", gold="42" → `r_correct=0`.
@@ -2867,7 +2865,7 @@ make show-train-config
 
 13. **No question-type classifier; LLM self-selects DAG structure:** The paper describes a fine-tuned RoBERTa classifier that categorizes questions into parallel / sequential / hybrid before selecting a per-type prompt and few-shot set. The upstream repo does not include that classifier or its training code (the repo only supports looking up types from a pre-labeled file that is also not provided). Rather than reimplementing the classifier, this module removes the question-type concept entirely: the shipped DAG prompt (§4a) instructs the LLM to choose the structure itself, and **all** few-shot examples (parallel + sequential + hybrid) are always included in the prompt. This eliminates the external dependency on a label file or classifier model, simplifies the pipeline, and lets the LLM reason about structure from the question directly.
 
-14. **Single weighted scalar reward (not constrained RL):** Training uses a single reward signal `r = w_correct * r_correct + w_valid * r_valid - w_depth * depth_term - w_invalid * 1[invalid]`. This keeps training within standard GRPO, makes the objective explicit via configurable weights, and avoids the complexity of constrained RL or multi-objective optimization. The trade-off between correctness, valid graphs, and shallow plans is tuned by adjusting the four weights in Kconfig.
+14. **Single weighted scalar reward (not constrained RL):** Training uses a single reward signal `r = w_correct * r_correct + w_valid * r_valid - w_depth * depth_term`. This keeps training within standard GRPO, makes the objective explicit via configurable weights, and avoids the complexity of constrained RL or multi-objective optimization. The trade-off between correctness, valid graphs, and shallow plans is tuned by adjusting the three weights in Kconfig.
 
 15. **Overfit-PoC before full training:** A dedicated overfit-PoC mode (`CONFIG_TRAINING_MODE=TRAINING_MODE_OVERFIT_POC`) validates the entire training stack end-to-end on a tiny seeded subset (e.g. 16 examples) before committing to large-scale runs. This catches bugs in reward computation, data formatting, gradient flow, checkpoint saving, and curve generation early.
 
@@ -3103,7 +3101,7 @@ This module is thin — it is essentially a `datasets.Dataset.map()` call with a
 The reward for each generated completion is a **single weighted scalar**:
 
 ```
-r = w_correct * r_correct + w_valid * r_valid - w_depth * depth_term - w_invalid * 1[invalid]
+r = w_correct * r_correct + w_valid * r_valid - w_depth * depth_term
 ```
 
 **Component definitions:**
@@ -3111,9 +3109,8 @@ r = w_correct * r_correct + w_valid * r_valid - w_depth * depth_term - w_invalid
 | Component | Symbol | Value | Definition |
 |-----------|--------|-------|------------|
 | `r_correct` | `CONFIG_REWARD_WEIGHT_CORRECTNESS` | `1.0` | `1` if the answer obtained by executing the generated DAG (see §12a-v) matches the gold answer (exact match or fuzzy if `CONFIG_REWARD_CORRECTNESS_PARTIAL_CREDIT=y`); `0` if answer is wrong or DAG was invalid/unparseable |
-| `r_valid` | `CONFIG_REWARD_WEIGHT_VALIDITY` | `0.5` | `1` if the parsed DAG passes `validate_dag` (reuses the same upstream validator used by inference); `0` otherwise |
-| `depth_term` | `CONFIG_REWARD_WEIGHT_DEPTH` | `0.1` | Depth of the DAG (longest path in nodes), normalized according to `CONFIG_REWARD_DEPTH_NORMALIZATION`. If DAG is invalid, `depth_term = 0` (no depth penalty on top of the invalid penalty) |
-| `1[invalid]` | `CONFIG_REWARD_WEIGHT_INVALID_PENALTY` | `0.5` | Binary: `1` if the DAG is invalid (failed `validate_dag` or unparseable JSON), `0` if valid |
+| `r_valid` | `CONFIG_REWARD_WEIGHT_VALIDITY` | `0.5` | `1` if the parsed DAG passes `validate_dag` (reuses the same upstream validator used by inference); `0` otherwise. Invalid DAGs receive no validity bonus |
+| `depth_term` | `CONFIG_REWARD_WEIGHT_DEPTH` | `0.1` | Depth of the DAG (longest path in nodes), normalized according to `CONFIG_REWARD_DEPTH_NORMALIZATION`. When the DAG is unparseable, `depth=0` so `depth_term=0` |
 
 **Depth normalization modes:**
 
@@ -3121,7 +3118,7 @@ r = w_correct * r_correct + w_valid * r_valid - w_depth * depth_term - w_invalid
 - `DIVIDE_BY_MAX_DEPTH`: `depth_term = min(depth / CONFIG_REWARD_MAX_DEPTH, 1.0)`. With default `CONFIG_REWARD_MAX_DEPTH=10`, a depth-5 DAG contributes `0.5`, a depth-10+ DAG contributes `1.0`.
 - `CLAMPED_LINEAR`: Alias for `DIVIDE_BY_MAX_DEPTH`. Implements the same formula. Both names are accepted in `.config`; the implementation maps them to a single code path.
 
-**Parse failure handling:** If `CONFIG_REWARD_INVALID_IF_PARSE_FAILS=y` (default), any completion that cannot be parsed as a JSON array at all receives `r_correct=0`, `r_valid=0`, `depth_term=0`, `1[invalid]=1`, giving reward `= -w_invalid`.
+**Parse failure handling:** Any completion that cannot be parsed as a JSON array receives `r_correct=0`, `r_valid=0`, `depth_term=0`, giving reward `= 0.0`.
 
 **Partial credit:** If `CONFIG_REWARD_CORRECTNESS_PARTIAL_CREDIT=y`, `r_correct` is a float in `[0, 1]` computed using `difflib.SequenceMatcher(None, predicted.lower(), gold.lower()).ratio()` (stdlib, no extra dependency). If `n` (default), `r_correct` is binary: `1` if `predicted.strip().lower() == gold.strip().lower()`, `0` otherwise.
 
@@ -3666,7 +3663,7 @@ Written once at end of training. Contains:
     "training_mode": "grpo",
     "global_seed": 42,
     "resolved_seeds": { "training": 42, "dataloader": 42, "generation": 42, "reward": 42, "eval": 42 },
-    "reward_config": { "mode": "weighted_sum", "w_correct": 1.0, "w_valid": 0.5, "w_depth": 0.1, "w_invalid": 0.5, "depth_norm": "divide_by_max_depth", "max_depth": 10 },
+    "reward_config": { "mode": "weighted_sum", "w_correct": 1.0, "w_valid": 0.5, "w_depth": 0.1, "depth_norm": "divide_by_max_depth", "max_depth": 10 },
     "lora_config": { "r": 16, "alpha": 32, "dropout": 0.05, "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"] },
     "base_model": "mistralai/Mistral-7B-Instruct-v0.3",
     "train_examples": 3600,
@@ -3722,10 +3719,8 @@ Written once at end of training. Contains:
   "w_correct": 1.0,
   "w_valid": 0.5,
   "w_depth": 0.1,
-  "w_invalid": 0.5,
   "depth_normalization": "divide_by_max_depth",
   "max_depth": 10,
-  "invalid_if_parse_fails": true,
   "correctness_partial_credit": false
 }
 ```

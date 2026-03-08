@@ -5,7 +5,6 @@ Computes a single weighted scalar reward for each generated DAG completion::
     r = w_correct * r_correct
       + w_valid   * r_valid
       - w_depth   * depth_term
-      - w_invalid * 1[invalid]
 
 Depth normalization modes:
 
@@ -33,7 +32,6 @@ def compute(
     r_correct: float,
     r_valid: float,
     depth: int,
-    is_invalid: bool,
     config: "Config",
 ) -> float:
     """Compute the weighted scalar reward for a single completion.
@@ -49,8 +47,6 @@ def compute(
     depth:
         Longest-path depth of the DAG (integer >= 0).  ``0`` when the DAG
         is invalid or unparseable.
-    is_invalid:
-        ``True`` if the DAG failed validation or could not be parsed.
     config:
         Fully-resolved project ``Config`` carrying ``REWARD_WEIGHT_*`` and
         ``REWARD_DEPTH_NORMALIZATION`` / ``REWARD_MAX_DEPTH``.
@@ -63,18 +59,13 @@ def compute(
     w_correct = config.REWARD_WEIGHT_CORRECTNESS
     w_valid = config.REWARD_WEIGHT_VALIDITY
     w_depth = config.REWARD_WEIGHT_DEPTH
-    w_invalid = config.REWARD_WEIGHT_INVALID_PENALTY
 
     depth_term = _normalize_depth(depth, config)
-
-    if is_invalid:
-        depth_term = 0.0
 
     reward = (
         w_correct * r_correct
         + w_valid * r_valid
         - w_depth * depth_term
-        - w_invalid * (1.0 if is_invalid else 0.0)
     )
     return reward
 

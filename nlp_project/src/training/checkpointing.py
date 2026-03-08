@@ -83,10 +83,8 @@ def _make_reward_config(config: "Config") -> Dict[str, Any]:
         "w_correct": config.REWARD_WEIGHT_CORRECTNESS,
         "w_valid": config.REWARD_WEIGHT_VALIDITY,
         "w_depth": config.REWARD_WEIGHT_DEPTH,
-        "w_invalid": config.REWARD_WEIGHT_INVALID_PENALTY,
         "depth_normalization": config.REWARD_DEPTH_NORMALIZATION,
         "max_depth": config.REWARD_MAX_DEPTH,
-        "invalid_if_parse_fails": config.REWARD_INVALID_IF_PARSE_FAILS,
         "correctness_partial_credit": config.REWARD_CORRECTNESS_PARTIAL_CREDIT,
     }
 

@@ -230,7 +230,7 @@ config REWARD_WEIGHTED_SUM
 	bool "Weighted sum"
 	help
 	  r = w_correct * r_correct + w_valid * r_valid
-	    - w_depth * depth_term - w_invalid * 1[invalid]
+	    - w_depth * depth_term
 
 endchoice
 
@@ -253,12 +253,6 @@ config REWARD_WEIGHT_DEPTH
 	default "0.1"
 	help
 	  Weight for the depth penalty term. Parsed as float.
-
-config REWARD_WEIGHT_INVALID_PENALTY
-	string "Weight: invalid DAG penalty"
-	default "0.5"
-	help
-	  Flat penalty for producing an invalid DAG. Parsed as float.
 
 choice REWARD_DEPTH_NORMALIZATION
 	prompt "Depth normalization method"
@@ -291,13 +285,6 @@ config REWARD_MAX_DEPTH
 	help
 	  Maximum depth used by DIVIDE_BY_MAX_DEPTH and CLAMPED_LINEAR
 	  normalization modes.
-
-config REWARD_INVALID_IF_PARSE_FAILS
-	bool "Treat parse failures as invalid DAG"
-	default y
-	help
-	  If the LLM output cannot be parsed as JSON at all, treat as
-	  invalid DAG in the reward computation.
 
 config REWARD_CORRECTNESS_PARTIAL_CREDIT
 	bool "Partial credit for correctness"

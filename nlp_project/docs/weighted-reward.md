@@ -1,7 +1,7 @@
 # Training Mistral-7B-Instruct-v0.3 with GRPO and LoRA (Minimising DAG Depth)
 
 **Executive Summary:** We propose fine-tuning the Mistral-7B-Instruct-v0.3 model on a reasoning task with Directed Acyclic Graph (DAG) outputs, using **Group Relative Policy Optimization (GRPO)** for reinforcement learning and **LoRA** (Low-Rank Adaptation) for parameter-efficient tuning. Using an RTX 5090 (32 GB) with mixed precision (e.g. 4-bit quantization and bfloat16), we can fit Mistral-7B with LoRA (rank ~16–32) in memory【11†L109-L118】【31†L21-L29】. GRPO obviates a value network by sampling *N* outputs per prompt, scoring each, and normalizing each score by the group mean and standard deviation【54†L327-L335】. We supply three signals to GRPO: (1) **DAG depth** (to be minimised as a cost); (2) **DAG validity** (binary or score: 1 if the output graph is a valid DAG, else 0); and (3) **DAG correctness** (whether the final answer is correct). The implementation plan uses a **single weighted reward** throughout:
-`Reward = w_correct * r_correct + w_valid * r_valid - w_depth * depth - w_invalid * 1[invalid]`.
+`Reward = w_correct * r_correct + w_valid * r_valid - w_depth * depth`.
 This keeps training within standard GRPO, makes the objective explicit, and lets us tune the trade-off between short plans, valid graphs, and correct answers without adding a separate constrained-RL layer.
 
 Our training plan includes: curate or generate a DAG-structured QA dataset (with known answers and gold-plan graphs) and format prompts to elicit stepwise reasoning. We would first do a **supervised instruction fine-tuning (SFT)** (perhaps mixing in human QA traces) to initialize, then apply GRPO. The training loop uses Hugging Face Transformers + PEFT: we load Mistral-7B-Instruct with 4-bit quantization and prepare it for k-bit training【11†L93-L102】, attach LoRA adapters (e.g. `LoraConfig(r=16–32, alpha=32–64)`) to attention and MLP projections【11†L109-L118】, and wrap in a PPO/GRPO training loop. For each batch of prompts, we sample *M* outputs per prompt (with top-k or nucleus sampling) and compute rewards from correctness, validity, and depth. The **advantage** for each output is then $(r - \mu)/\sigma$ where $\mu,\sigma$ are the group’s mean/std (implementable in code as shown in GRPO-Zero【54†L327-L335】). We form the GRPO surrogate loss (clipped probability ratios times advantage, plus a small KL penalty to the reference policy to prevent drift)【54†L327-L335】. We periodically merge/snapshot LoRA weights, evaluate metrics (exact match, DAG validity rate, average depth), and enforce safety (e.g. KL penalty, ban degenerate outputs).
@@ -60,12 +60,12 @@ This follows the GRPO description (see **Policy-Gradient/GRPO-Zero** implementat
 
 Each response’s total reward is a **single weighted sum**:
 \[
-r = w_{\text{corr}}\, r_{\text{corr}} + w_{\text{valid}}\, r_{\text{valid}} - w_{\text{depth}}\, \text{depth} - w_{\text{invalid}}\, \mathbf{1}[\text{invalid DAG}].
+r = w_{\text{corr}}\, r_{\text{corr}} + w_{\text{valid}}\, r_{\text{valid}} - w_{\text{depth}}\, \text{depth}.
 \]
 
 A practical starting point is to make correctness dominant, validity second, and depth a softer optimization pressure. For example:
 - set $w_{\text{corr}}$ highest so shallow but wrong answers are never preferred;
-- set $w_{\text{valid}}$ and $w_{\text{invalid}}$ large enough that invalid DAGs are strongly disfavored;
+- set $w_{\text{valid}}$ large enough that invalid DAGs are strongly disfavored (invalid DAGs receive no validity bonus);
 - set $w_{\text{depth}}$ smaller so the model first learns to stay correct and valid, then compresses reasoning depth.
 
 This is the only implementation plan in this document: all three signals are incorporated into one scalar reward and optimized directly with GRPO.
@@ -114,11 +114,10 @@ flowchart LR
 | **Reward Component** | **Role in Training** | **Typical Design Choice** |
 |----------------------|----------------------|---------------------------|
 | Correctness          | Main task objective  | Highest positive weight   |
-| Validity             | Structural quality   | Positive reward for valid DAG |
-| Invalid DAG penalty  | Strong discouragement of malformed outputs | Large negative penalty |
+| Validity             | Structural quality   | Positive reward for valid DAG; invalid DAGs get 0 |
 | Depth                | Efficiency pressure  | Smaller negative weight than correctness |
 
-*Table 3. Weighted reward design used in this implementation. The reward is a single scalar combining correctness, validity, invalidity penalty, and depth. Correctness should dominate, validity should be strongly encouraged, and depth should be optimized only after correctness and validity are stable.*  
+*Table 3. Weighted reward design used in this implementation. The reward is a single scalar combining correctness, validity, and depth. Correctness should dominate, validity should be strongly encouraged, and depth should be optimized only after correctness and validity are stable.*  
 
 **Failure Modes & Mitigation:** Key risks include *reward hacking* (e.g. outputting trivial but “valid” graphs to minimize depth) and *mode collapse*. To mitigate, we anchor to the base model via a KL penalty【24†L281-L288】, filter incoherent outputs, and ensure the weighted reward is calibrated so correctness dominates depth minimization. Invalid outputs should receive a clear negative reward rather than ambiguous treatment. Monitor diversity of outputs. Overfitting to the training prompts is possible; use validation DAG-correctness metrics and early stopping. Low LoRA rank may underfit complex reasoning (mitigate by increasing rank or SFT first). Memory exhaustion is a risk; use gradient checkpointing and offloading if needed.
 

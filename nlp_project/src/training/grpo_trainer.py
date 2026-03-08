@@ -164,14 +164,10 @@ def _build_reward_func(
                     )
                     r_correct = 0.0
 
-            if is_parse_fail and config.REWARD_INVALID_IF_PARSE_FAILS:
-                is_invalid = True
-
             scalar = reward.compute(
                 r_correct=r_correct,
                 r_valid=r_valid,
                 depth=depth,
-                is_invalid=is_invalid,
                 config=config,
             )
             rewards.append(scalar)

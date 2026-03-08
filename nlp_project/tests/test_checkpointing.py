@@ -53,10 +53,8 @@ class _StubConfig:
     REWARD_WEIGHT_CORRECTNESS: float = 1.0
     REWARD_WEIGHT_VALIDITY: float = 0.5
     REWARD_WEIGHT_DEPTH: float = 0.1
-    REWARD_WEIGHT_INVALID_PENALTY: float = 0.5
     REWARD_DEPTH_NORMALIZATION: str = "DIVIDE_BY_MAX_DEPTH"
     REWARD_MAX_DEPTH: int = 10
-    REWARD_INVALID_IF_PARSE_FAILS: bool = True
     REWARD_CORRECTNESS_PARTIAL_CREDIT: bool = False
 
     # We need __dataclass_fields__ to exist for _make_config_snapshot
