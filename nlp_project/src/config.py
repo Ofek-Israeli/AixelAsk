@@ -45,8 +45,7 @@ _FEWSHOT_FILES = {
     "FEWSHOT_PARALLEL_HYBRID_EXTENDED": [
         "prompt/fewshot/fewshot_parallel.txt",
         "prompt/fewshot/fewshot_hybrid.txt",
-        "prompt/fewshot/fewshot_parallel_extended.txt",
-        "prompt/fewshot/fewshot_hybrid_extended.txt",
+        "prompt/fewshot/fewshots_extended.txt",
     ],
 }
 

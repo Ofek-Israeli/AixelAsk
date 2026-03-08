@@ -62,7 +62,7 @@ config FEWSHOT_PARALLEL_HYBRID_EXTENDED
 	bool "Parallel + hybrid extended (no sequential)"
 	help
 	  Concatenates fewshot_parallel.txt, fewshot_hybrid.txt,
-	  fewshot_parallel_extended.txt, fewshot_hybrid_extended.txt.
+	  fewshots_extended.txt.
 
 endchoice
 
