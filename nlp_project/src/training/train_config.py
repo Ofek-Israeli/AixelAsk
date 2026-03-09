@@ -78,7 +78,7 @@ def build_grpo_config(config: "Config"):
         top_p=config.GRPO_TOP_P,
         top_k=config.GRPO_TOP_K if config.GRPO_TOP_K > 0 else None,
         max_grad_norm=1.0,
-        cliprange=config.GRPO_CLIP_EPS,
+        epsilon=config.GRPO_CLIP_EPS,
         beta=config.GRPO_KL_COEF,
         learning_rate=config.GRPO_LR,
         gradient_accumulation_steps=config.GRPO_GRAD_ACCUM,

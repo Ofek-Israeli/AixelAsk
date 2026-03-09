@@ -158,6 +158,7 @@ class Config:
     OVERFIT_POC_NUM_EXAMPLES: int = 16
     OVERFIT_POC_SELECTION_MODE: str = "FIRST_N"
     OVERFIT_POC_INDICES_FILE: str = ""
+    OVERFIT_POC_ID_LIST: str = ""
 
     GLOBAL_SEED: int = 42
     TRAINING_SEED: int = -1
@@ -189,6 +190,7 @@ class Config:
     REWARD_WEIGHT_DEPTH: float = 0.1
     REWARD_DEPTH_NORMALIZATION: str = "DIVIDE_BY_MAX_DEPTH"
     REWARD_MAX_DEPTH: int = 10
+    REWARD_INVALID_DAG_DEPTH: int = 0
     REWARD_CORRECTNESS_PARTIAL_CREDIT: bool = False
 
     TRAIN_USE_4BIT: bool = True
@@ -278,7 +280,7 @@ _INT_FIELDS = {
     "CONFIG_GRPO_MAX_NEW_TOKENS", "CONFIG_GRPO_TOP_K",
     "CONFIG_GRPO_GRAD_ACCUM", "CONFIG_GRPO_SAVE_EVERY_STEPS",
     "CONFIG_GRPO_EVAL_EVERY_STEPS",
-    "CONFIG_REWARD_MAX_DEPTH",
+    "CONFIG_REWARD_MAX_DEPTH", "CONFIG_REWARD_INVALID_DAG_DEPTH",
     "CONFIG_TRAIN_LORA_R", "CONFIG_TRAIN_LORA_ALPHA",
     "CONFIG_OVERFIT_POC_NUM_EXAMPLES",
     "CONFIG_TRAIN_CURVES_UPDATE_EVERY_STEPS",
@@ -433,6 +435,25 @@ def load_config(
         cfg.INFERENCE_BACKEND = "VLLM"
     else:
         cfg.INFERENCE_BACKEND = "SGLANG"
+
+    # Training mode choice
+    _yes = ("y", "yes", "true", "1")
+    if raw.get("CONFIG_TRAINING_MODE_OVERFIT_POC", "").lower() in _yes:
+        cfg.TRAINING_MODE = "TRAINING_MODE_OVERFIT_POC"
+    elif raw.get("CONFIG_TRAINING_MODE_GRPO", "").lower() in _yes:
+        cfg.TRAINING_MODE = "TRAINING_MODE_GRPO"
+    else:
+        cfg.TRAINING_MODE = "TRAINING_MODE_DISABLED"
+
+    # Overfit PoC selection mode choice
+    if raw.get("CONFIG_OVERFIT_POC_EXPLICIT_IDS", "").lower() in _yes:
+        cfg.OVERFIT_POC_SELECTION_MODE = "EXPLICIT_IDS"
+    elif raw.get("CONFIG_OVERFIT_POC_RANDOM_SEEDED", "").lower() in _yes:
+        cfg.OVERFIT_POC_SELECTION_MODE = "RANDOM_SEEDED"
+    elif raw.get("CONFIG_OVERFIT_POC_FIXED_INDICES_FILE", "").lower() in _yes:
+        cfg.OVERFIT_POC_SELECTION_MODE = "FIXED_INDICES_FILE"
+    elif raw.get("CONFIG_OVERFIT_POC_FIRST_N", "").lower() in _yes:
+        cfg.OVERFIT_POC_SELECTION_MODE = "FIRST_N"
 
     # LOG_LLM_RESPONSES forced on when LOG_LLM_PROMPTS is on
     if cfg.LOG_LLM_PROMPTS:

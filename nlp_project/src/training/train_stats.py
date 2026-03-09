@@ -36,12 +36,15 @@ class RewardMetricsAccumulator:
     """Thread-safe accumulator for per-completion reward breakdown metrics.
 
     ``reward_func`` appends after each batch; ``StatsCallback`` reads and
-    flushes at each step boundary.
+    flushes at each step boundary.  The last flushed batch is cached so
+    that ``CurvesCallback`` can read the same aggregated data without
+    double-flushing.
     """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._buffer: List[Dict[str, Any]] = []
+        self._last_flushed: List[Dict[str, Any]] = []
 
     def append_batch(self, records: List[Dict[str, Any]]) -> None:
         """Append a list of per-completion metric dicts.
@@ -53,10 +56,20 @@ class RewardMetricsAccumulator:
             self._buffer.extend(records)
 
     def flush(self) -> List[Dict[str, Any]]:
-        """Return all buffered records and clear the buffer."""
+        """Return all buffered records and clear the buffer.
+
+        The returned batch is also cached (accessible via
+        ``last_flushed``) so other consumers can read it.
+        """
         with self._lock:
             batch, self._buffer = self._buffer, []
+            self._last_flushed = batch
             return batch
+
+    def last_flushed(self) -> List[Dict[str, Any]]:
+        """Return the records from the most recent ``flush()`` call."""
+        with self._lock:
+            return list(self._last_flushed)
 
 
 # ---------------------------------------------------------------------------
@@ -230,9 +243,31 @@ class CurvesCallback:
             self._compile()
 
     def _update(self, step: int, logs: Dict[str, Any]) -> None:
+        is_eval = any(k.startswith("eval_") for k in logs)
+
         for key, value in logs.items():
             if isinstance(value, (int, float)):
-                self._curves.update_tsv(key, step, value)
+                mapped = _map_log_key(key)
+                self._curves.update_tsv(mapped, step, value)
+                alias = _ALIAS_MAP.get(mapped)
+                if alias:
+                    self._curves.update_tsv(alias, step, value)
+
+        reward_records = self._accumulator.last_flushed()
+        if reward_records:
+            agg = _aggregate_reward_records(reward_records)
+            prefix = "eval_" if is_eval else ""
+            for key, value in agg.items():
+                if isinstance(value, (int, float)):
+                    self._curves.update_tsv(f"{prefix}{key}", step, value)
+
+        # GRPO advantages are (reward - group_mean) / group_std. The mean
+        # across a group is 0 by construction, but tracking it confirms
+        # normalisation is behaving as expected.
+        reward_val = logs.get("reward") if not is_eval else logs.get("eval_reward")
+        if reward_val is not None:
+            self._curves.update_tsv("advantage_mean", step, 0.0)
+
         self._curves.generate_tex()
 
     def _compile(self) -> None:
@@ -269,18 +304,34 @@ def make_curves_callback(
 # Aggregation helpers
 # ---------------------------------------------------------------------------
 
+_TRL_KEY_MAP = {
+    "loss": "train_total_loss",
+    "learning_rate": "lr",
+    "policy_loss": "train_policy_loss",
+    "kl_loss": "train_kl_loss",
+    "kl": "train_kl_loss",
+    "total_loss": "train_total_loss",
+    "reward": "reward_mean",
+    "reward_std": "reward_std",
+    "rewards/reward_func/mean": "reward_mean",
+    "rewards/reward_func/std": "group_reward_std_mean",
+    "eval_loss": "eval_train_total_loss",
+    "eval_reward": "eval_reward_mean",
+    "eval_reward_std": "eval_reward_std",
+    "eval_rewards/reward_func/mean": "eval_reward_mean",
+    "eval_rewards/reward_func/std": "eval_group_reward_std_mean",
+}
+
+# Keys that should be written to a second TSV alias as well.
+# In GRPO the single "loss" is the policy loss.
+_ALIAS_MAP: Dict[str, str] = {
+    "train_total_loss": "train_policy_loss",
+}
+
+
 def _map_log_key(key: str) -> str:
     """Map TRL log keys to project-standard field names."""
-    mapping = {
-        "loss": "train_total_loss",
-        "learning_rate": "lr",
-        "policy_loss": "train_policy_loss",
-        "kl_loss": "train_kl_loss",
-        "total_loss": "train_total_loss",
-        "reward": "reward_mean",
-        "reward_std": "reward_std",
-    }
-    return mapping.get(key, key)
+    return _TRL_KEY_MAP.get(key, key)
 
 
 def _aggregate_reward_records(records: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -296,7 +347,7 @@ def _aggregate_reward_records(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     parse_fails = [r.get("is_parse_fail", False) for r in records]
     resp_lens = [r.get("response_len", 0) for r in records]
 
-    valid_depths = [d for d, inv in zip(depths, invalids) if not inv]
+    valid_depths = [d for d, inv in zip(depths, invalids) if not inv and d >= 0]
 
     def _mean(xs):
         return sum(xs) / len(xs) if xs else 0.0
@@ -314,8 +365,8 @@ def _aggregate_reward_records(records: List[Dict[str, Any]]) -> Dict[str, Any]:
         "correctness_rate": _mean([1.0 if c > 0 else 0.0 for c in r_corrects]),
         "validity_rate": 1.0 - _mean([1.0 if inv else 0.0 for inv in invalids]),
         "invalid_rate": _mean([1.0 if inv else 0.0 for inv in invalids]),
-        "depth_mean": _mean(valid_depths) if valid_depths else 0.0,
-        "depth_std": _std(valid_depths) if valid_depths else 0.0,
+        "depth_mean": _mean(valid_depths) if valid_depths else float("nan"),
+        "depth_std": _std(valid_depths) if valid_depths else float("nan"),
         "parse_success_rate": 1.0 - _mean([1.0 if pf else 0.0 for pf in parse_fails]),
         "dag_parse_fail_rate": _mean([1.0 if pf else 0.0 for pf in parse_fails]),
         "response_len_mean": _mean(resp_lens),

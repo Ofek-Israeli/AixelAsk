@@ -89,14 +89,17 @@ def parse(completion_text: str) -> ParseResult:
             return ParseResult(dag=dag_list, error_category=ERROR_MISSING_KEYS)
         if node["Action"] not in ("Retrieval", "Reasoning"):
             return ParseResult(dag=dag_list, error_category=ERROR_INVALID_ACTION)
+        nexts = node.get("Next") or []
+        if not isinstance(nexts, list) or any(isinstance(n, (dict, list)) for n in nexts):
+            return ParseResult(dag=dag_list, error_category=ERROR_MISSING_KEYS)
 
     # Terminal nodes must be Reasoning
     node_ids_with_successors = set()
     for node in dag_list:
-        for nxt in node.get("Next", []):
+        for nxt in (node.get("Next") or []):
             node_ids_with_successors.add(nxt)
     for node in dag_list:
-        if not node["Next"] and node["Action"] != "Reasoning":
+        if not (node.get("Next") or []) and node["Action"] != "Reasoning":
             return ParseResult(
                 dag=dag_list, error_category=ERROR_TERMINAL_NOT_REASONING,
             )
@@ -110,6 +113,7 @@ def parse(completion_text: str) -> ParseResult:
     if validated_dag is None:
         return ParseResult(dag=dag_list, error_category=ERROR_VALIDATION_FAILED)
 
+    _normalize_topk(validated_dag)
     depth = _compute_dag_depth(validated_dag)
 
     return ParseResult(dag=validated_dag, valid=True, depth=depth)
@@ -159,7 +163,7 @@ def execute_for_reward(
     try:
         return _execute_impl(dag, table, question, config, table_embedding_map)
     except Exception:
-        logger.exception("execute_for_reward failed")
+        logger.debug("execute_for_reward failed", exc_info=True)
         return ""
 
 
@@ -183,6 +187,8 @@ def _execute_impl(
     table_embeddings = _get_table_embeddings(
         table, table_embedding_map, config,
     )
+    if table_embeddings is None:
+        return ""
 
     # --- Execute DAG: retrieval ---
     final_subtable, _row_idx, _col_idx = (
@@ -213,6 +219,20 @@ def _execute_impl(
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+def _normalize_topk(dag: List[Dict[str, Any]]) -> None:
+    """Normalize ``Top k`` values for upstream compatibility."""
+    for node in dag:
+        val = node.get("Top k", "1")
+        if isinstance(val, str):
+            if val.lower() == "all":
+                node["Top k"] = "all"
+            else:
+                try:
+                    node["Top k"] = str(int(val))
+                except (ValueError, TypeError):
+                    node["Top k"] = "1"
+
 
 def _extract_json_array(text: str) -> Optional[List[Dict[str, Any]]]:
     """Try to extract a JSON array of objects from *text*."""
@@ -254,7 +274,7 @@ def _has_cycle(dag_list: List[Dict[str, Any]]) -> bool:
         on_stack.add(node_id)
         node = node_map.get(node_id)
         if node:
-            for nxt in node.get("Next", []):
+            for nxt in (node.get("Next") or []):
                 if nxt not in node_map or dfs(nxt):
                     return True
         on_stack.discard(node_id)
@@ -277,7 +297,7 @@ def _compute_dag_depth(dag: List[Dict[str, Any]]) -> int:
     all_ids = set(node_map.keys())
     child_ids: set = set()
     for node in dag:
-        for nxt in node.get("Next", []):
+        for nxt in (node.get("Next") or []):
             child_ids.add(nxt)
     roots = all_ids - child_ids
     if not roots:
@@ -297,7 +317,7 @@ def _compute_dag_depth(dag: List[Dict[str, Any]]) -> int:
         max_depth = max(max_depth, d)
         node = node_map.get(nid)
         if node:
-            for nxt in node.get("Next", []):
+            for nxt in (node.get("Next") or []):
                 if nxt in node_map:
                     queue.append((nxt, d + 1))
 
@@ -327,15 +347,15 @@ def _get_table_embeddings(
     table: Any,
     table_embedding_map: Optional[Dict[str, Any]],
     config: "Config",
-) -> Dict[str, Any]:
-    """Look up precomputed embeddings or compute on-the-fly."""
+) -> Optional[Dict[str, Any]]:
+    """Look up precomputed embeddings; return None if not cached."""
     table_id = _get_table_id(table)
 
     if table_embedding_map and table_id in table_embedding_map:
         return table_embedding_map[table_id]
 
-    logger.debug("Table %s not in cache — computing embeddings on-the-fly", table_id)
-    return _compute_embeddings_on_the_fly(table, config)
+    logger.debug("Table %s not in embedding cache — skipping correctness", table_id)
+    return None
 
 
 def _compute_embeddings_on_the_fly(
@@ -347,18 +367,16 @@ def _compute_embeddings_on_the_fly(
     Uses upstream ``get_embeddings`` from ``scripts.save_embeddings`` and
     description generators from ``scripts.processing_format``.
     """
-    from utils.processing import clean_table, index_table
+    from utils.processing import clean_table, index_table, sample_table_rows
     from scripts.save_embeddings import get_embeddings
     from scripts.processing_format import get_row_flattened, get_col_description
     from utils.request_gpt import request_gpt_embedding
+    import random as _random
 
     cleaned = clean_table(table)
     indexed = index_table(cleaned)
 
-    header = indexed[0][1:]  # strip "row index"
-    rows = indexed[1:]
-
-    row_descriptions = [get_row_flattened(header, row[1:]) for row in rows]
+    row_descriptions = get_row_flattened(indexed)
     row_embeddings = get_embeddings(row_descriptions, request_gpt_embedding)
 
     col_prompt_path = config.COL_PROMPT if hasattr(config, "COL_PROMPT") else ""
@@ -370,8 +388,19 @@ def _compute_embeddings_on_the_fly(
         except FileNotFoundError:
             pass
 
-    col_descriptions = [get_col_description(col_name, col_prompt) for col_name in header]
-    col_embeddings = get_embeddings(col_descriptions, request_gpt_embedding)
+    # Pad small tables so sample_table_rows(table, 5) inside
+    # get_col_description doesn't raise "Sample larger than population".
+    padded = list(cleaned)
+    while len(padded) - 1 < 5 and len(padded) > 1:
+        padded.append(_random.choice(padded[1:]))
+
+    col_descriptions, _used_fallback, _attempts = get_col_description(
+        padded, col_prompt,
+    )
+    col_embeddings = get_embeddings(
+        col_descriptions.split("\n") if isinstance(col_descriptions, str) else col_descriptions,
+        request_gpt_embedding,
+    )
 
     return {
         "row_embeddings": row_embeddings,

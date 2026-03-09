@@ -15,8 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-import random
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Tuple
 
 import datasets
 
@@ -30,6 +29,7 @@ logger = logging.getLogger(__name__)
 def format_for_grpo(
     split_result: "SplitResult",
     config: "Config",
+    tokenizer=None,
 ) -> Tuple[datasets.Dataset, datasets.Dataset]:
     """Format split datasets for ``GRPOTrainer``.
 
@@ -39,6 +39,9 @@ def format_for_grpo(
         Output of ``split_utils.build_splits``.
     config:
         Fully-resolved project ``Config``.
+    tokenizer:
+        HF tokenizer — used to apply the chat template so the model
+        sees the same ``[INST]...[/INST]`` framing as during inference.
 
     Returns
     -------
@@ -50,16 +53,31 @@ def format_for_grpo(
     prompt_template = _load_prompt_template(config)
     fewshot_text = _load_fewshot_examples(config)
 
+    from utils.processing import sample_table_rows, list_to_markdown
+
+    num_sample_rows = config.NUM_SAMPLE_ROWS
+
     def _format_example(example: Dict[str, Any]) -> Dict[str, Any]:
         table = example.get("table", example.get("table_text", []))
         question = example.get("statement", example.get("question", ""))
         gold = example.get("answer", example.get("gold_answer", ""))
 
-        sampled_rows = _sample_table_rows(table, config.NUM_SAMPLE_ROWS)
+        parsed_table = _ensure_list(table)
+        num_rows = min(num_sample_rows, max(len(parsed_table) - 1, 0))
+        header, sampled_rows = sample_table_rows(parsed_table, num_rows)
+        markdown_table = list_to_markdown(header, sampled_rows)
 
-        prompt = _render_prompt(
-            prompt_template, question, sampled_rows, fewshot_text,
+        raw_prompt = _render_prompt(
+            prompt_template, question, markdown_table, fewshot_text,
         )
+
+        if tokenizer is not None:
+            messages = [{"role": "user", "content": raw_prompt}]
+            prompt = tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True,
+            )
+        else:
+            prompt = raw_prompt
 
         if isinstance(table, str):
             try:
@@ -115,33 +133,16 @@ def _load_fewshot_examples(config: "Config") -> str:
     return "\n\n".join(parts)
 
 
-def _sample_table_rows(table: Any, num_rows: int) -> str:
-    """Format a sample of table rows for the prompt context."""
+def _ensure_list(table: Any) -> list:
+    """Ensure *table* is a list-of-lists (parse JSON string if needed)."""
     if isinstance(table, str):
         try:
             table = json.loads(table)
         except (json.JSONDecodeError, TypeError):
-            return str(table)[:500]
-
-    if not isinstance(table, list) or not table:
-        return str(table)[:500]
-
-    header = table[0] if table else []
-    data_rows = table[1:] if len(table) > 1 else []
-
-    if len(data_rows) > num_rows:
-        sampled = data_rows[:num_rows]
-    else:
-        sampled = data_rows
-
-    lines: List[str] = []
-    if header:
-        lines.append(" | ".join(str(h) for h in header))
-        lines.append("-" * len(lines[0]))
-    for row in sampled:
-        lines.append(" | ".join(str(cell) for cell in row))
-
-    return "\n".join(lines)
+            return []
+    if isinstance(table, list):
+        return table
+    return []
 
 
 def _render_prompt(
@@ -152,24 +153,12 @@ def _render_prompt(
 ) -> str:
     """Render the DAG-generation prompt with question and table context.
 
-    Handles both Jinja2 templates and simpler ``{placeholder}`` templates.
+    Uses the same Jinja2 variable names as the inference pipeline
+    (``patch_dag.py``): ``fewshot``, ``question``, ``table``.
     """
-    try:
-        from jinja2 import Template
-        tmpl = Template(template)
-        rendered = tmpl.render(
-            question=question,
-            table=table_sample,
-            fewshot_examples=fewshot_text,
-            few_shot_examples=fewshot_text,
-        )
-        return rendered
-    except Exception:
-        prompt = template
-        prompt = prompt.replace("{{question}}", question)
-        prompt = prompt.replace("{{table}}", table_sample)
-        prompt = prompt.replace("{{fewshot_examples}}", fewshot_text)
-        prompt = prompt.replace("{question}", question)
-        prompt = prompt.replace("{table}", table_sample)
-        prompt = prompt.replace("{fewshot_examples}", fewshot_text)
-        return prompt
+    import jinja2
+    return jinja2.Template(template).render(
+        fewshot=fewshot_text,
+        question=question,
+        table=table_sample,
+    )

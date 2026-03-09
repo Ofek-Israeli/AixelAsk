@@ -55,6 +55,9 @@ config OVERFIT_POC_RANDOM_SEEDED
 config OVERFIT_POC_FIXED_INDICES_FILE
 	bool "Fixed indices file — load explicit indices from a file"
 
+config OVERFIT_POC_EXPLICIT_IDS
+	bool "Explicit YAML IDs — comma-separated list in config"
+
 endchoice
 
 config OVERFIT_POC_INDICES_FILE
@@ -64,6 +67,17 @@ config OVERFIT_POC_INDICES_FILE
 	help
 	  Path to a file with explicit indices (one per line). Used only
 	  when OVERFIT_POC_SELECTION_MODE=FIXED_INDICES_FILE.
+
+config OVERFIT_POC_ID_LIST
+	string "Overfit PoC YAML ID list"
+	default ""
+	depends on OVERFIT_POC_EXPLICIT_IDS
+	help
+	  Comma-separated YAML split IDs that identify the exact training
+	  examples to use. Uses the same ID format as train_valid_test.yaml,
+	  e.g. "w4k-train-289, w+-train-686, scalability-3314".
+	  OVERFIT_POC_NUM_EXAMPLES is ignored when this mode is active;
+	  the count is determined by the number of IDs provided.
 
 comment "Training reproducibility / seeds"
 
@@ -286,6 +300,22 @@ config REWARD_MAX_DEPTH
 	  Maximum depth used by DIVIDE_BY_MAX_DEPTH and CLAMPED_LINEAR
 	  normalization modes.
 
+config REWARD_INVALID_DAG_DEPTH
+	int "Effective depth for invalid DAGs"
+	default 0
+	help
+	  Depth value assigned to completions that fail DAG parsing or
+	  validation. This value flows into both the reward function
+	  (depth penalty term) and metrics aggregation.
+
+	  Conventions:
+	    0   — no depth penalty for invalid DAGs (default, backward
+	          compatible).
+	    100 — large penalty via the depth term in the reward
+	          (penalises invalid DAGs heavily).
+	    -1  — sentinel: excluded from depth_mean aggregation so
+	          the curve shows NaN/gap instead of a misleading zero.
+
 config REWARD_CORRECTNESS_PARTIAL_CREDIT
 	bool "Partial credit for correctness"
 	default n
@@ -304,12 +334,14 @@ config TRAIN_USE_4BIT
 config TRAIN_BNB_4BIT_QUANT_TYPE
 	string "BitsAndBytes 4-bit quantization type"
 	default "nf4"
+	depends on TRAIN_USE_4BIT
 	help
 	  "nf4" or "fp4".
 
 config TRAIN_BNB_4BIT_COMPUTE_DTYPE
 	string "BitsAndBytes compute dtype"
 	default "bfloat16"
+	depends on TRAIN_USE_4BIT
 	help
 	  Compute dtype for 4-bit ops: "bfloat16" or "float16".
 

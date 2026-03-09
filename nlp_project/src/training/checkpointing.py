@@ -85,6 +85,7 @@ def _make_reward_config(config: "Config") -> Dict[str, Any]:
         "w_depth": config.REWARD_WEIGHT_DEPTH,
         "depth_normalization": config.REWARD_DEPTH_NORMALIZATION,
         "max_depth": config.REWARD_MAX_DEPTH,
+        "invalid_dag_depth": config.REWARD_INVALID_DAG_DEPTH,
         "correctness_partial_credit": config.REWARD_CORRECTNESS_PARTIAL_CREDIT,
     }
 

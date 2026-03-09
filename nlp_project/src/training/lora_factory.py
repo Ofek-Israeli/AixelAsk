@@ -35,6 +35,7 @@ def build_model_and_tokenizer(
         Local snapshot directory returned by
         ``download_models.resolve_model_path(config)``.
     """
+    import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
     from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 
@@ -58,14 +59,13 @@ def build_model_and_tokenizer(
         resolved_model_path,
         quantization_config=bnb_config,
         device_map="auto",
+        torch_dtype=torch.float16,
+        attn_implementation="eager",
         trust_remote_code=config.TRUST_REMOTE_CODE,
     )
 
     if config.TRAIN_USE_4BIT:
         model = prepare_model_for_kbit_training(model)
-
-    if config.TRAIN_USE_GRADIENT_CHECKPOINTING:
-        model.gradient_checkpointing_enable()
 
     lora_config = LoraConfig(
         r=config.TRAIN_LORA_R,

@@ -119,6 +119,11 @@ def compile_one(tex_path: str, config: "Config") -> Dict:
     return status
 
 
+def _find_executable(name: str) -> str | None:
+    """Return full path for name, or None if not in PATH."""
+    return shutil.which(name)
+
+
 def _build_compile_cmd(
     config: "Config",
     tmpdir: str,
@@ -128,16 +133,21 @@ def _build_compile_cmd(
     engine = config.TRAIN_CURVES_LATEX_ENGINE
 
     if config.TRAIN_CURVES_LATEXMK:
-        return [
-            "latexmk",
-            "-pdf",
-            f"-{engine}" if engine != "pdflatex" else "-pdflatex",
-            f"-output-directory={tmpdir}",
-            tex_filename,
-        ]
+        latexmk_cmd = _find_executable("latexmk")
+        if latexmk_cmd is not None:
+            return [
+                latexmk_cmd,
+                "-pdf",
+                f"-{engine}" if engine != "pdflatex" else "-pdflatex",
+                f"-output-directory={tmpdir}",
+                tex_filename,
+            ]
+        # Fallback to pdflatex when latexmk is not in PATH
+        logger.debug("latexmk not found in PATH, using %s directly", engine)
 
+    engine_cmd = _find_executable(engine) or engine
     return [
-        engine,
+        engine_cmd,
         "-interaction=nonstopmode",
         f"-output-directory={tmpdir}",
         tex_filename,
@@ -152,3 +162,32 @@ def _write_compile_status(config: "Config", statuses: List[Dict]) -> None:
     status_path = os.path.join(manifests_dir, "compile_status.json")
     with open(status_path, "w") as f:
         json.dump(statuses, f, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# CLI entrypoint for: python -m src.training.tex_compile --config .config --all
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    import argparse
+    import sys
+
+    from src.config import load_config
+
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+
+    parser = argparse.ArgumentParser(description="Compile learning curve TeX files to PDF")
+    parser.add_argument("--config", default=".config", help="Path to Kconfig .config file")
+    parser.add_argument("--all", action="store_true", help="Compile all .tex files in curves/tex")
+    args = parser.parse_args()
+
+    if not os.path.exists(args.config):
+        logger.error("Config file not found: %s", args.config)
+        sys.exit(1)
+
+    config = load_config(args.config)
+    if args.all:
+        compile_all(config)
+    else:
+        logger.warning("Use --all to compile all curves")
+        sys.exit(0)

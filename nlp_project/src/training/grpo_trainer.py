@@ -85,7 +85,7 @@ def build_trainer(
 
     callbacks.append(make_metadata_callback(config))
 
-    trainer = GRPOTrainer(
+    trainer = _PatchedGRPOTrainer(
         model=model,
         args=grpo_config,
         train_dataset=train_dataset,
@@ -103,6 +103,40 @@ def build_trainer(
     )
 
     return trainer
+
+
+from trl import GRPOTrainer as _GRPOTrainerBase
+
+
+class _PatchedGRPOTrainer(_GRPOTrainerBase):
+    """Disables gradient checkpointing during generation.
+
+    TRL's ``unwrap_model_for_generation`` doesn't toggle gradient
+    checkpointing, which corrupts generation output on certain GPUs
+    (e.g. RTX 5090 / SM120).  This subclass wraps
+    ``_generate_and_score_completions`` to disable it for the duration
+    of generation, then re-enable it afterwards.
+    """
+
+    def _generate_and_score_completions(self, inputs):
+        unwrapped = self.accelerator.unwrap_model(self.model)
+        gc_was_enabled = getattr(unwrapped, "is_gradient_checkpointing", False)
+
+        if gc_was_enabled:
+            unwrapped.gradient_checkpointing_disable()
+            logger.info("GC disabled for generation (was_enabled=%s, now=%s)",
+                        gc_was_enabled,
+                        getattr(unwrapped, "is_gradient_checkpointing", "?"))
+
+        try:
+            return super()._generate_and_score_completions(inputs)
+        finally:
+            if gc_was_enabled:
+                unwrapped.gradient_checkpointing_enable(
+                    gradient_checkpointing_kwargs={"use_reentrant": False}
+                )
+                logger.info("GC re-enabled after generation (now=%s)",
+                            getattr(unwrapped, "is_gradient_checkpointing", "?"))
 
 
 # ---------------------------------------------------------------------------
@@ -148,7 +182,7 @@ def _build_reward_func(
             r_valid = 1.0 if parsed.valid else 0.0
             is_invalid = not parsed.valid
             is_parse_fail = parsed.error_category == dag_reward_parser.ERROR_JSON_PARSE
-            depth = parsed.depth
+            depth = parsed.depth if not is_invalid else config.REWARD_INVALID_DAG_DEPTH
 
             if parsed.valid and parsed.dag:
                 try:

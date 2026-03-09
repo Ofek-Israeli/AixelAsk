@@ -190,6 +190,7 @@ class CurvesManager:
         to the last N rows after appending.
         """
         tsv_path = os.path.join(self._data_dir, f"{metric_name}.tsv")
+        os.makedirs(os.path.dirname(tsv_path), exist_ok=True)
         if not os.path.exists(tsv_path):
             with open(tsv_path, "w") as f:
                 f.write("step\tvalue\n")

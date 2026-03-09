@@ -35,9 +35,17 @@ import json
 import logging
 import os
 import random
+import subprocess
 import sys
 import time
 from typing import Optional
+
+# Pin training to GPU 1 if multiple GPUs are present (GPU 0 reserved for vLLM).
+# Must happen BEFORE importing torch so CUDA only sees the target device.
+if "CUDA_VISIBLE_DEVICES" not in os.environ:
+    _nvsmi = subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True)
+    if _nvsmi.returncode == 0 and _nvsmi.stdout.strip().count("\n") >= 1:
+        os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 import numpy as np
 import torch
@@ -133,6 +141,17 @@ def main() -> None:
         len(split_result.train), len(split_result.valid), len(split_result.test),
     )
 
+    if config.TRAINING_MODE == "TRAINING_MODE_OVERFIT_POC":
+        from src.training.tiny_overfit_poc import select_overfit_subset
+
+        indices = select_overfit_subset(config, split_result.train)
+        split_result.train = split_result.train.select(indices)
+        split_result.valid = split_result.train  # same subset for eval
+        logger.info(
+            "Overfit-PoC: subsampled to %d examples (train=valid)",
+            len(split_result.train),
+        )
+
     # ==================================================================
     # 5a. Resolve model path
     # ==================================================================
@@ -153,13 +172,16 @@ def main() -> None:
     # ==================================================================
     # 5c. Start inference server + init clients
     # ==================================================================
+    if not config.CUDA_VISIBLE_DEVICES:
+        config.CUDA_VISIBLE_DEVICES = "0"
+
     from src import inference_server
     from src.llm_client import LlmClient
     from src.embedding_client import EmbeddingClient
 
     atexit.register(inference_server.stop, config)
 
-    logger.info("Starting inference server for reward-time DAG execution...")
+    logger.info("Starting inference server for reward-time DAG execution..."  )
     inference_server.start(config, resolved_model_path)
 
     llm_client = LlmClient(config, resolved_model_path)
@@ -202,7 +224,7 @@ def main() -> None:
     from src.training.rl_dataset import format_for_grpo
 
     logger.info("Formatting datasets for GRPO...")
-    train_dataset, eval_dataset = format_for_grpo(split_result, config)
+    train_dataset, eval_dataset = format_for_grpo(split_result, config, tokenizer=tokenizer)
 
     # ==================================================================
     # 8. Build trainer (includes all callbacks)
@@ -388,6 +410,7 @@ def _write_final_summary(config, trainer, elapsed: float, split_result, seeds: d
                 "w_depth": config.REWARD_WEIGHT_DEPTH,
                 "depth_norm": config.REWARD_DEPTH_NORMALIZATION,
                 "max_depth": config.REWARD_MAX_DEPTH,
+                "invalid_dag_depth": config.REWARD_INVALID_DAG_DEPTH,
             },
             "lora_config": {
                 "r": config.TRAIN_LORA_R,
