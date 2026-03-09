@@ -45,8 +45,9 @@ def compute(
         Validity signal: ``1`` if the DAG passes ``validate_dag``; ``0``
         otherwise.
     depth:
-        Longest-path depth of the DAG (integer >= 0).  ``0`` when the DAG
-        is invalid or unparseable.
+        Longest-path depth of the DAG (integer >= 0).
+        ``CONFIG_REWARD_INVALID_DAG_DEPTH`` when the DAG is invalid or
+        unparseable.
     config:
         Fully-resolved project ``Config`` carrying ``REWARD_WEIGHT_*`` and
         ``REWARD_DEPTH_NORMALIZATION`` / ``REWARD_MAX_DEPTH``.
