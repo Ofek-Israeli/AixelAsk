@@ -11,10 +11,14 @@ MENUCONFIG   := tools/menuconfig.py
        test-trained test-trained-best test-trained-latest \
        compile-curves show-train-config show-paths
 
+# Optional: override to edit a specific config file, e.g.
+#   make menuconfig MENUCONFIG_CONFIG=defconfig.train_overfit_poc
+MENUCONFIG_CONFIG ?= $(DOTCONFIG)
+
 menuconfig: $(MENUCONFIG)
 	@$(PYTHON) -c "import kconfiglib" 2>/dev/null || \
 		{ echo "ERROR: kconfiglib not installed. Run: pip install kconfiglib"; exit 1; }
-	KCONFIG_CONFIG=$(DOTCONFIG) $(PYTHON) $(MENUCONFIG) $(KCONFIG)
+	KCONFIG_CONFIG=$(MENUCONFIG_CONFIG) $(PYTHON) $(MENUCONFIG) $(KCONFIG)
 
 defconfig:
 	cp $(DEFCONFIG) $(DOTCONFIG)

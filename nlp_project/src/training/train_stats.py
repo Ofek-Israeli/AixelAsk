@@ -229,14 +229,17 @@ class CurvesCallback:
 
     def on_log(self, args, state, control, logs=None, **kwargs) -> None:
         step = state.global_step
+        is_eval = logs and any(k.startswith("eval_") for k in logs)
 
-        if logs and step - self._last_update_step >= self._update_every:
+        if logs and (is_eval or step - self._last_update_step >= self._update_every):
             self._update(step, logs)
-            self._last_update_step = step
+            if not is_eval:
+                self._last_update_step = step
 
-        if step - self._last_compile_step >= self._compile_every:
+        if is_eval or step - self._last_compile_step >= self._compile_every:
             self._compile()
-            self._last_compile_step = step
+            if not is_eval:
+                self._last_compile_step = step
 
     def on_train_end(self, args, state, control, **kwargs) -> None:
         if self._config.TRAIN_CURVES_COMPILE_AT_END:

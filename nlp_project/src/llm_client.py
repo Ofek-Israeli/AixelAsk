@@ -19,7 +19,7 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
-from openai import OpenAI
+from openai import BadRequestError, OpenAI
 
 if TYPE_CHECKING:
     from src.config import Config
@@ -101,6 +101,10 @@ class LlmClient:
                     **self._standard_params,
                     extra_body=self._extra_body,
                 )
+            except BadRequestError as exc:
+                last_error = f"[attempt {attempt}/{self._retries}] {exc}"
+                logger.warning("LLM request failed (non-retriable): %s", last_error)
+                break
             except Exception as exc:
                 last_error = f"[attempt {attempt}/{self._retries}] {exc}"
                 logger.warning("LLM request failed: %s", last_error)

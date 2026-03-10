@@ -61,6 +61,8 @@ def format_for_grpo(
         table = example.get("table", example.get("table_text", []))
         question = example.get("statement", example.get("question", ""))
         gold = example.get("answer", example.get("gold_answer", ""))
+        if isinstance(gold, list):
+            gold = ", ".join(str(g) for g in gold)
 
         parsed_table = _ensure_list(table)
         num_rows = min(num_sample_rows, max(len(parsed_table) - 1, 0))
