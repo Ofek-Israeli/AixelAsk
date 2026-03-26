@@ -50,8 +50,20 @@ def _probe_health(base_url: str, endpoint: str) -> bool:
         return False
 
 
-def start(config: Config, resolved_model_path: str) -> None:
-    """Spawn the vLLM server subprocess and wait until healthy."""
+def start(
+    config: Config,
+    resolved_model_path: str,
+    lora_adapter_path: Optional[str] = None,
+) -> None:
+    """Spawn the vLLM server subprocess and wait until healthy.
+
+    Parameters
+    ----------
+    lora_adapter_path:
+        If provided, vLLM is launched with ``--enable-lora`` and registers
+        the adapter under the name ``"adapter"``.  Callers can then select
+        it per-request via ``model="adapter"`` in the chat completions API.
+    """
     global _server_process
 
     host = config.SERVER_HOST
@@ -83,6 +95,12 @@ def start(config: Config, resolved_model_path: str) -> None:
         "--max-model-len", str(config.SERVER_CONTEXT_LENGTH),
         "--gpu-memory-utilization", config.VLLM_GPU_MEMORY_UTILIZATION,
     ]
+    if lora_adapter_path is not None:
+        cmd.extend([
+            "--enable-lora",
+            "--lora-modules", f"adapter={lora_adapter_path}",
+            "--max-lora-rank", str(config.TRAIN_LORA_R),
+        ])
     if config.VLLM_EXTRA_ARGS:
         import shlex
         cmd.extend(shlex.split(config.VLLM_EXTRA_ARGS))

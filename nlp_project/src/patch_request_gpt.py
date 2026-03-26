@@ -47,12 +47,19 @@ def init_patches(
     # Always patch embedding
     rg.request_gpt_embedding = embedding_client.embed_one
 
+    def _use_adapter() -> bool:
+        return llm_client.has_adapter and ctx_stage.get() == "dag_generation"
+
     if call_recorder is None:
-        rg.request_gpt_chat = llm_client.chat
-        rg.request_gpt_chat_1 = llm_client.chat
+        def simple_chat(prompt: str) -> str:
+            return llm_client.chat(prompt, use_adapter=_use_adapter())
+
+        rg.request_gpt_chat = simple_chat
+        rg.request_gpt_chat_1 = simple_chat
     else:
         def recording_chat(prompt: str) -> str:
-            result = llm_client.chat_with_metadata(prompt)
+            use_adapter = _use_adapter()
+            result = llm_client.chat_with_metadata(prompt, use_adapter=use_adapter)
 
             captured_prompt = prompt if config.LOG_LLM_PROMPTS else None
             captured_response = result.text if config.LOG_LLM_RESPONSES else None

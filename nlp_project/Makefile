@@ -9,7 +9,7 @@ MENUCONFIG   := tools/menuconfig.py
        run-baseline run-baseline-fewshot-ph-ext \
        train train-grpo train-overfit-poc resume-train \
        test-trained test-trained-best test-trained-latest \
-       compile-curves show-train-config show-paths
+       compile-curves eval-checkpoints show-train-config show-paths
 
 # Optional: override to edit a specific config file, e.g.
 #   make menuconfig MENUCONFIG_CONFIG=defconfig.train_overfit_poc
@@ -75,6 +75,9 @@ test-trained-latest: $(DOTCONFIG)
 
 compile-curves: $(DOTCONFIG)
 	$(PYTHON) -m src.training.tex_compile --config $(DOTCONFIG) --all
+
+eval-checkpoints: $(DOTCONFIG)
+	$(PYTHON) -m src.training.eval_checkpoints --config $(DOTCONFIG)
 
 show-train-config: $(DOTCONFIG)
 	@grep -E '^CONFIG_(TRAIN|GRPO|REWARD|OVERFIT|GLOBAL_SEED|TRAINING|SPLIT|TEST_TRAINED)' $(DOTCONFIG) | sort

@@ -174,41 +174,40 @@ def _execute_impl(
     config: "Config",
     table_embedding_map: Optional[Dict[str, Any]],
 ) -> str:
-    # Deferred upstream imports
     from utils.processing import clean_table, index_table
     from scripts.get_sub_table import retrieve_final_subtable_DAG_save_embedding
-    from scripts.generate_answer import generate_final_answer_DAG
+    from scripts.generate_answer import generate_final_answer_DAG, generate_noplan_answer
 
-    # --- Prepare table ---
     cleaned = clean_table(table)
     indexed = index_table(cleaned)
 
-    # --- Obtain embeddings ---
+    # Match pipeline: single-node DAGs use noplan_reasoning with full table
+    if len(dag) <= 1:
+        with open(config.NOPLAN_REASONING_PROMPT, "r") as f:
+            noplan_prompt = f.read()
+        answer = generate_noplan_answer(question, indexed, noplan_prompt)
+        return answer if answer else ""
+
+    # Multi-node DAGs: normal retrieval + answer generation
     table_embeddings = _get_table_embeddings(
         table, table_embedding_map, config,
     )
     if table_embeddings is None:
         return ""
 
-    # --- Execute DAG: retrieval ---
     final_subtable, _row_idx, _col_idx = (
         retrieve_final_subtable_DAG_save_embedding(
             dag, indexed, table_embeddings, question,
         )
     )
 
-    # Build subtable with header for answer generation
-    header = indexed[0][1:]  # strip "row index" column
-    col_indices = _col_idx
-    subtable_header = [header[j] for j in col_indices]
+    header = indexed[0][1:]
+    subtable_header = [header[j] for j in _col_idx]
     final_subtable_with_header = [subtable_header] + final_subtable
 
-    # --- Load final-reasoning prompt template ---
-    prompt_path = config.FINAL_REASONING_PROMPT
-    with open(prompt_path, "r") as f:
+    with open(config.FINAL_REASONING_PROMPT, "r") as f:
         prompt_template = f.read()
 
-    # --- Generate answer ---
     answer = generate_final_answer_DAG(
         question, dag, final_subtable_with_header, prompt_template,
     )

@@ -41,9 +41,15 @@ class ChatResult:
 class LlmClient:
     """Thread-safe client for a locally-running inference server."""
 
-    def __init__(self, config: Config, resolved_model_path: str) -> None:
+    def __init__(
+        self,
+        config: Config,
+        resolved_model_path: str,
+        adapter_model_name: Optional[str] = None,
+    ) -> None:
         self._config = config
         self._model = resolved_model_path
+        self._adapter_model = adapter_model_name
         self._retries = config.LLM_RETRIES
         self._semaphore = threading.Semaphore(config.CLIENT_CONCURRENCY)
 
@@ -51,7 +57,7 @@ class LlmClient:
         self._client = OpenAI(
             api_key="EMPTY",
             base_url=base_url,
-            timeout=60.0,
+            timeout=240.0,
             max_retries=0,
         )
 
@@ -70,22 +76,32 @@ class LlmClient:
         if config.LLM_TOP_K > 0:
             self._extra_body = {"top_k": config.LLM_TOP_K}
 
+    @property
+    def has_adapter(self) -> bool:
+        return self._adapter_model is not None
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def chat(self, prompt: str) -> str:
+    def chat(self, prompt: str, use_adapter: bool = False) -> str:
         """Send *prompt* and return the response text.
 
         Drop-in replacement for ``request_gpt_chat``.  Retries with
         exponential backoff on transient failures.
+
+        When *use_adapter* is ``True`` and an adapter was registered at
+        init, the request is routed to the LoRA adapter model served by
+        vLLM; otherwise the base model is used.
         """
-        result = self.chat_with_metadata(prompt)
+        result = self.chat_with_metadata(prompt, use_adapter=use_adapter)
         if result.error:
             raise RuntimeError(f"LLM chat failed after retries: {result.error}")
         return result.text
 
-    def chat_with_metadata(self, prompt: str) -> ChatResult:
+    def chat_with_metadata(
+        self, prompt: str, use_adapter: bool = False,
+    ) -> ChatResult:
         """Send *prompt* and return a ``ChatResult`` with full metadata.
 
         Acquires the concurrency semaphore, retries with exponential
@@ -93,12 +109,16 @@ class LlmClient:
         """
         last_error: Optional[str] = None
 
+        params = self._standard_params
+        if use_adapter and self._adapter_model is not None:
+            params = {**self._standard_params, "model": self._adapter_model}
+
         for attempt in range(1, self._retries + 1):
             self._semaphore.acquire()
             try:
                 response = self._client.chat.completions.create(
                     messages=[{"role": "user", "content": prompt}],
-                    **self._standard_params,
+                    **params,
                     extra_body=self._extra_body,
                 )
             except BadRequestError as exc:

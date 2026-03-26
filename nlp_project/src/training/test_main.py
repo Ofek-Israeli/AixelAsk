@@ -9,18 +9,23 @@ Usage::
 Evaluates a trained checkpoint on the **test split only** using the full
 inference pipeline (parallel DAG executor, retries, metadata enrichment).
 
+The base model is served via vLLM; adapter-only checkpoints are loaded
+as native vLLM LoRA modules so the adapter is applied **only** during
+DAG generation.  All other pipeline stages (answer generation, etc.)
+use the unmodified base model — matching the ``src.main`` default path.
+
 Flow:
 
 1.  Parse ``.config``.
 2.  Resolve checkpoint via ``checkpoint_resolver``.
-2a. Resolve base model path (for adapter merging).
+2a. Resolve base model path.
 2b. Bootstrap upstream imports.
-3.  If adapter-only: merge to temp dir, register ``atexit`` cleanup.
-4.  Set runtime overrides (``serving_model_path``, output paths).
+3.  Determine serving strategy (base model + optional LoRA adapter).
+4.  Set runtime overrides (output paths).
 5.  Setup logging.
 6.  Register ``atexit(inference_server.stop)``.
-7.  Start inference server with ``serving_model_path``.
-8.  Init clients.
+7.  Start inference server (base model, with LoRA if adapter-only).
+8.  Init clients (LlmClient gets adapter_model_name when applicable).
 9.  Create runtime coordination objects.
 10. Apply ALL monkey-patches.
 11. ``pipeline.run()`` — TEST SPLIT ONLY.
@@ -34,13 +39,13 @@ import atexit
 import json
 import logging
 import os
-import shutil
 import sys
-import tempfile
 import time
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
+
+ADAPTER_MODEL_NAME = "adapter"
 
 
 def main() -> None:
@@ -87,31 +92,15 @@ def main() -> None:
     bootstrap_upstream_imports(config)
 
     # ==================================================================
-    # 3. If adapter-only: merge to temp dir
+    # 3. Determine serving strategy
     # ==================================================================
-    serving_model_path: str
-    merge_dir: Optional[str] = None
+    serving_model_path = resolved_base_model_path
+    lora_adapter_path: Optional[str] = None
+    adapter_model_name: Optional[str] = None
 
     if resolved_checkpoint.is_adapter_only:
-        from src.training.lora_factory import merge_and_export
-
-        merge_dir = tempfile.mkdtemp(
-            dir=config.EPHEMERAL_TMPDIR,
-            prefix="merged_ckpt_",
-        )
-        atexit.register(shutil.rmtree, merge_dir, True)
-
-        logger.info(
-            "Adapter-only checkpoint — merging to temp dir: %s",
-            merge_dir,
-        )
-        merge_and_export(
-            resolved_checkpoint.path,
-            merge_dir,
-            config,
-            resolved_base_model_path,
-        )
-        serving_model_path = merge_dir
+        lora_adapter_path = resolved_checkpoint.path
+        adapter_model_name = ADAPTER_MODEL_NAME
     else:
         serving_model_path = resolved_checkpoint.path
 
@@ -129,10 +118,11 @@ def main() -> None:
     setup_logging(config)
 
     logger.info(
-        "Post-training test: checkpoint=%s (%s), serving=%s",
+        "Post-training test: checkpoint=%s (%s), base_model=%s, lora=%s",
         resolved_checkpoint.source,
         resolved_checkpoint.path,
         serving_model_path,
+        lora_adapter_path or "none",
     )
 
     # ==================================================================
@@ -143,10 +133,12 @@ def main() -> None:
     atexit.register(inference_server.stop, config)
 
     # ==================================================================
-    # 7. Start inference server with serving_model_path
+    # 7. Start inference server (base model + optional LoRA)
     # ==================================================================
-    logger.info("Starting inference server with trained model...")
-    inference_server.start(config, serving_model_path)
+    logger.info("Starting inference server with base model...")
+    inference_server.start(
+        config, serving_model_path, lora_adapter_path=lora_adapter_path,
+    )
 
     # ==================================================================
     # 8. Init clients
@@ -154,7 +146,9 @@ def main() -> None:
     from src.llm_client import LlmClient
     from src.embedding_client import EmbeddingClient
 
-    llm_client = LlmClient(config, serving_model_path)
+    llm_client = LlmClient(
+        config, serving_model_path, adapter_model_name=adapter_model_name,
+    )
     embedding_client = EmbeddingClient(config)
 
     # ==================================================================

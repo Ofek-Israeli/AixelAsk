@@ -7,7 +7,7 @@ Delegates ``start`` / ``stop`` to either ``sglang_server`` or
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from src.config import Config
@@ -15,14 +15,18 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def start(config: Config, resolved_model_path: str) -> None:
+def start(
+    config: Config,
+    resolved_model_path: str,
+    lora_adapter_path: Optional[str] = None,
+) -> None:
     """Start the inference server selected by config."""
     backend = config.INFERENCE_BACKEND
     logger.info("Starting inference server (backend=%s)...", backend)
 
     if backend == "VLLM":
         from src import vllm_server
-        vllm_server.start(config, resolved_model_path)
+        vllm_server.start(config, resolved_model_path, lora_adapter_path=lora_adapter_path)
     else:
         from src import sglang_server
         sglang_server.start(config, resolved_model_path)

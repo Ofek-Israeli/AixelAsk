@@ -318,11 +318,22 @@ def _resolve_resume_path(args, config) -> Optional[str]:
         return path
 
     ckpt_dir = os.path.join(config.TRAIN_OUTPUT_DIR, "checkpoints")
+    output_dir = config.TRAIN_OUTPUT_DIR
+
+    def _resolve_ckpt(subpath: str) -> Optional[str]:
+        """Resolve checkpoint path; TRL saves to output_dir, not ckpt_dir."""
+        subpath = subpath.rstrip("/")
+        for base in (output_dir, ckpt_dir):
+            p = os.path.join(base, subpath)
+            if os.path.isdir(p):
+                return p
+        return None
+
     latest_link = os.path.join(ckpt_dir, "latest")
     if os.path.islink(latest_link):
         target = os.readlink(latest_link)
-        path = os.path.join(ckpt_dir, target)
-        if os.path.isdir(path):
+        path = _resolve_ckpt(target)
+        if path:
             return path
 
     index_path = os.path.join(ckpt_dir, "checkpoint_index.json")
@@ -331,9 +342,9 @@ def _resolve_resume_path(args, config) -> Optional[str]:
             index = json.load(f)
         checkpoints = index.get("checkpoints", [])
         for entry in reversed(checkpoints):
-            p = os.path.join(ckpt_dir, entry["path"])
-            if os.path.isdir(p):
-                return p
+            path = _resolve_ckpt(entry["path"])
+            if path:
+                return path
 
     logger.warning("--resume specified but no checkpoint found; starting fresh.")
     return None

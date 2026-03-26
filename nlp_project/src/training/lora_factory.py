@@ -127,6 +127,7 @@ def merge_and_export(
     )
     model = AutoModelForCausalLM.from_pretrained(
         resolved_base_model_path,
+        torch_dtype=torch.float16,
         device_map="cpu",
         trust_remote_code=config.TRUST_REMOTE_CODE,
     )
